@@ -21,7 +21,7 @@ claude --version    # Claude Code 2.1.139+ (--session-id, /goal 지원)
 
 ### 1.2 프로젝트 클론 + 의존성 설치
 ```bash
-cd /Users/roto/workspace/luida   # 또는 roto-ai-agent (rename 예정)
+cd /Users/roto/workspace/luida
 bun install
 bun run typecheck                # 0 error 확인
 bun test                         # 전체 grean 확인
