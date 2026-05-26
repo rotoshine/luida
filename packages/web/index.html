@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1440, initial-scale=1" />
+<title>Luida · 주점 대시보드</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/quiple/galmuri/dist/galmuri.css">
+
+<style>
+  * { box-sizing: border-box; }
+  html, body, #root {
+    margin: 0;
+    padding: 0;
+    background: #000000;
+    color: #fff;
+    font-family: 'Galmuri11', 'DotGothic16', monospace;
+    image-rendering: pixelated;
+    -webkit-font-smoothing: none;
+    font-smooth: never;
+    text-rendering: geometricPrecision;
+  }
+  body { background: #000000; min-height: 100vh; }
+  button { font-family: inherit; }
+  button:focus-visible { outline: 2px solid #FCD34D; outline-offset: 2px; }
+  @keyframes luida-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+  @keyframes luida-toast-in {
+    0% { transform: translateY(-20px); opacity: 0; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+  body::after {
+    content: '';
+    position: fixed; inset: 0; pointer-events: none;
+    background-image: repeating-linear-gradient(
+      0deg, rgba(255,255,255,0.018) 0, rgba(255,255,255,0.018) 1px,
+      transparent 1px, transparent 3px);
+    mix-blend-mode: overlay; z-index: 1;
+  }
+  #root { position: relative; z-index: 2; }
+  @font-face { font-family: 'Galmuri11'; font-display: swap; src: local('Galmuri11'), local('DotGothic16'); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
+</body>
+</html>
