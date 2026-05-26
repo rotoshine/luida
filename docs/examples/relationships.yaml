@@ -1,0 +1,41 @@
+# Luida relationships.yaml — 자동화 룰 정의 (예시)
+#
+# 위치: ~/.luida/relationships.yaml (실제 사용 시)
+# 동기화: `luida brain sync-rules` 또는 brain 데몬 시작 시 자동 로드 (Phase 4)
+#
+# 형식:
+#   relationships:
+#     - name: <고유 이름>
+#       from: <트리거 발화 모험가 이름>
+#       trigger:
+#         kind: path_changed | quest_completed | tag_pushed
+#         paths: ["<glob>", ...]     # path_changed에서 필수
+#         status: <quest status>     # quest_completed에서 선택
+#       to: <대상 모험가 이름>
+#       action: auto_dispatch | propose
+#       brief_template: "변수: {files}, {quest_id}, {from}, {to}, {brief}"
+#       enabled: true | false
+
+relationships:
+  - name: agora-schema-to-admin
+    from: agora
+    trigger:
+      kind: path_changed
+      paths:
+        - "prisma/**"
+        - "schema/**"
+        - "**/*.graphql"
+    to: admin
+    action: auto_dispatch
+    brief_template: "agora schema 변경 ({files})을 admin codegen에 반영"
+    enabled: true
+
+  - name: every-pr-notify-luida
+    from: admin
+    trigger:
+      kind: quest_completed
+      status: completed
+    to: luida
+    action: propose
+    brief_template: "admin PR ({quest_id}) 완료 — 다음 액션?"
+    enabled: false

@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@luida/core": ["./packages/core/src/index.ts"],
+      "@luida/core/*": ["./packages/core/src/*"],
+      "@luida/sidecar": ["./packages/sidecar/src/index.ts"],
+      "@luida/sidecar/*": ["./packages/sidecar/src/*"],
+      "@luida/brain": ["./packages/brain/src/index.ts"],
+      "@luida/brain/*": ["./packages/brain/src/*"],
+      "@luida/mcp": ["./packages/mcp/src/index.ts"],
+      "@luida/mcp/*": ["./packages/mcp/src/*"],
+      "@luida/web": ["./packages/web/src/index.ts"],
+      "@luida/web/*": ["./packages/web/src/*"],
+      "@luida/ui": ["./packages/ui/src/index.ts"],
+      "@luida/ui/*": ["./packages/ui/src/*"]
+    }
+  },
+  "include": ["packages/*/src/**/*"],
+  "exclude": ["node_modules", "**/dist", "**/*.d.ts"]
+}

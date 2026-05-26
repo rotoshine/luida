@@ -1,0 +1,18 @@
+node_modules
+dist
+*.tsbuildinfo
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+
+# Bun
+bun.lockb.bak
+
+# Luida runtime data — 절대 repo에 들어가면 안 됨 (memory/feedback-project-vs-runtime-paths)
+.luida/
+tavern.db
+tavern.db-*
+*.sqlite
+*.sqlite-*

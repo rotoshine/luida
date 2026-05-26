@@ -1,0 +1,16 @@
+{
+  "name": "luida",
+  "version": "0.0.0",
+  "private": true,
+  "description": "🍺 루이다의 술집 — multi-agent orchestration for cmux + Claude Code sessions",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "luida": "bun run packages/cli/src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.13",
+    "typescript": "^5.6.3"
+  }
+}

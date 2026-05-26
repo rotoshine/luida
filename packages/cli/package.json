@@ -1,0 +1,18 @@
+{
+  "name": "@luida/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "bin": {
+    "luida": "./src/index.ts"
+  },
+  "dependencies": {
+    "@luida/brain": "workspace:*",
+    "@luida/core": "workspace:*",
+    "@luida/mcp": "workspace:*",
+    "@luida/sidecar": "workspace:*",
+    "@luida/ui": "workspace:*",
+    "@luida/web": "workspace:*"
+  }
+}
