@@ -5,6 +5,9 @@ import {
   type Adventurer,
   type Quest,
   type Repos,
+  validateMemoryRecordInput,
+  validateQuestDispatchInput,
+  validateQuestGetInput,
 } from '@luida/core';
 import { MemoryStore, type RecallScope } from '@luida/brain';
 
@@ -108,9 +111,9 @@ export const questGet: ToolDef<QuestGetInput, { quest: Quest | null }> = {
     required: ['id'],
   },
   handler: (input, ctx) => {
-    const id = Number(input?.id);
-    if (!Number.isFinite(id)) throw new Error('id는 number여야 합니다');
-    return { quest: ctx.repos.quests.get(id) };
+    const r = validateQuestGetInput(input);
+    if (!r.ok) throw new Error(r.error);
+    return { quest: ctx.repos.quests.get(r.value.id) };
   },
 };
 
@@ -144,26 +147,20 @@ export const questDispatch: ToolDef<
     required: ['to', 'brief'],
   },
   handler: (input, ctx) => {
-    // 런타임 input 검증 (MCP 클라이언트는 임의 타입을 보낼 수 있음)
-    if (typeof input?.to !== 'string' || !input.to.trim()) {
-      throw new Error('to(모험가 이름)는 비어있지 않은 string이어야 합니다');
-    }
-    if (typeof input?.brief !== 'string' || !input.brief.trim()) {
-      throw new Error('brief는 비어있지 않은 string이어야 합니다');
-    }
+    const v = validateQuestDispatchInput(input);
+    if (!v.ok) throw new Error(v.error);
     const r = ctx.repos.inmail.enqueue({
       from_session: ctx.me,
-      to_session: input.to,
+      to_session: v.value.to,
       kind: 'dispatch',
       payload: {
-        brief: input.brief,
-        branch: typeof input.branch === 'string' ? input.branch : undefined,
-        base: typeof input.base === 'string' ? input.base : undefined,
-        pr_title:
-          typeof input.pr_title === 'string' ? input.pr_title : undefined,
+        brief: v.value.brief,
+        branch: v.value.branch,
+        base: v.value.base,
+        pr_title: v.value.pr_title,
       },
     });
-    return { inmail_id: r.id, inserted: r.inserted, to: input.to };
+    return { inmail_id: r.id, inserted: r.inserted, to: v.value.to };
   },
 };
 
@@ -260,19 +257,13 @@ export const memoryRecord: ToolDef<MemoryRecordInput, { ok: true }> = {
     required: ['type', 'content'],
   },
   handler: (input, ctx) => {
-    if (
-      input?.type !== 'chronicle' &&
-      input?.type !== 'project' &&
-      input?.type !== 'pattern'
-    ) {
-      throw new Error('type은 chronicle/project/pattern 중 하나여야 합니다');
-    }
-    if (typeof input.content !== 'string') {
-      throw new Error('content는 string이어야 합니다');
-    }
-    const name =
-      typeof input.name === 'string' ? input.name : undefined;
-    ctx.memory.record({ type: input.type, name, content: input.content });
+    const r = validateMemoryRecordInput(input);
+    if (!r.ok) throw new Error(r.error);
+    ctx.memory.record({
+      type: r.value.type,
+      name: r.value.name,
+      content: r.value.content,
+    });
     return { ok: true };
   },
 };

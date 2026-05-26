@@ -15,3 +15,13 @@ export { WorktrunkWorktree } from './integrations/worktree';
 export { ClaudeWorkerRunner } from './integrations/worker';
 export { GhVcsHost } from './integrations/vcs';
 export { createRealIntegrations } from './integrations';
+
+// Phase D: 권한 가드
+export {
+  DEFAULT_SECRET_PATTERNS,
+  checkPath,
+  defaultBlockedPaths,
+  evaluateHook,
+  maskSecrets,
+} from './guards';
+export type { GuardDecision, GuardInput, GuardOpts } from './guards';
