@@ -8,7 +8,7 @@ use luida_core::{
     CampaignRepo, Connection, HandoffBundle, ProjectRepo, QuestRepo, default_db_path, migrate,
     open_db,
 };
-use luida_brain::{ingest_project, report_campaign, MemoryVault};
+use luida_brain::{ingest_project, reflect, report_campaign, MemoryVault};
 use luida_planner::{plan_campaign, run_campaign};
 use luida_runtimes::runtime_for_kind;
 use luida_sidecar::{resume_quest, triage_escalation, WorktrunkProvider};
@@ -68,6 +68,12 @@ enum Cmd {
     Adventure {
         #[command(subcommand)]
         action: AdventureAction,
+    },
+    /// 학습 — 최근 이벤트 분석 → 프로젝트 관계 제안
+    Reflect {
+        /// 최근 N시간의 이벤트 (기본 24)
+        #[arg(long, default_value_t = 24)]
+        since_hours: i64,
     },
     /// HTTP/SSE 서버 (GUI·클라이언트 브리지)
     Server {
@@ -312,6 +318,23 @@ fn main() -> Result<()> {
                     let cid = resume_bundle(&mut conn, &bundle, &machine)?;
                     println!("⚔  원정 이어받음 (기기 {machine}) → 새 #{cid} (원본: {origin})");
                 }
+            }
+        }
+        Cmd::Reflect { since_hours } => {
+            let (mut conn, cfg) = open_ready(&db_path)?;
+            let since_ms = luida_core::now_ms() - since_hours.max(0) * 3_600_000;
+            let report = reflect(&mut conn, &cfg, since_ms, cli_factory)?;
+            println!(
+                "🧠 학습 완료 — 관계 제안 {}건 저장(비활성) / {}건 스킵 / 패턴 {}건",
+                report.proposals_inserted,
+                report.proposals_skipped,
+                report.patterns.len()
+            );
+            for p in &report.patterns {
+                println!("   · {p}");
+            }
+            if report.proposals_inserted > 0 {
+                println!("   제안은 비활성 상태입니다. 검토 후 활성화하세요.");
             }
         }
         Cmd::Agents { action } => {

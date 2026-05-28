@@ -8,9 +8,11 @@
 mod ingest;
 mod memory;
 mod memtree;
+mod reflect;
 mod report;
 
 pub use ingest::ingest_project;
 pub use memory::{sanitize_filename, MemoryVault};
 pub use memtree::{build_summary_tree, chunk_markdown, estimate_tokens, ingest_chunks};
+pub use reflect::{reflect, ReflectReport};
 pub use report::report_campaign;
