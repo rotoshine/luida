@@ -1,0 +1,10 @@
+[package]
+name = "luida-runtimes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+luida-core = { path = "../luida-core" }
+anyhow.workspace = true
