@@ -376,6 +376,7 @@ campaign의 모든 quest 종료
 | **V2-P9** | **Tauri 데스크탑 패키징** — TUI 화면(등록/원정/모니터)이 정착된 뒤, 동일 기능을 Web(React)로 맞춘 다음 Tauri로 래핑해 `Luida.app` 빌드. 자세히는 §12 | P0~P5 (TUI 흐름 완성), Web Track B |
 | **V2-P10** | **TokenJuice 압축 레이어** — AgentRuntime 전단 미들웨어. §5.4 | P2 |
 | **V2-P11** | **Memory Tree + Obsidian Vault** — 청크화·계층 요약 트리 + vault 호환. §6.1 | P8 (project.ingest), 학습 |
+| **V2-P12** | **모험 중단·재개 (Suspend/Resume)** — git handoff 브랜치로 미커밋 포함 통째 이전. single owner 잠금. §14 | P3 (campaigns) |
 
 각 Phase는 기존 4-게이트(typecheck/test/리뷰doc/리뷰agent) 규약을 그대로 따른다.
 
@@ -439,6 +440,88 @@ TUI(V2-P0~P5) → Web 포팅 → **Tauri 래핑(V2-P9)**. TUI 없이 Tauri부터
 
 ---
 
+## 14. 모험 중단 · 재개 (Suspend / Resume)
+
+여러 노트북(집·회사)을 오가며 같은 작업을 이어가는 시나리오. **커밋·푸시되지 않은 진행물까지** 통째로 다른 기기로 넘긴다.
+
+### 14.1 메타포 — 게임의 "중단 세이브"
+고전 게임 모바일 포팅의 suspend save와 동일: 세이브포인트(정식 저장)와 별개로, "지금 이 순간 상태"를 봉인했다 다른 기기에서 그 자리에서 재개.
+
+| 게임 | Luida |
+|---|---|
+| 일반 세이브 (세이브포인트) | git commit/push (worklog, 정식 저장) |
+| **중단 세이브 (suspend)** | `luida adventure suspend` (미커밋 포함 통째 봉인) |
+| 다른 기기에서 이어하기 | `luida adventure resume` |
+| 한 번에 한 기기만 플레이 | single owner 잠금 |
+| 재개하면 중단 세이브 소멸 | resume 후 WIP 커밋 폐기 |
+
+### 14.2 Transport — git handoff 브랜치 (확정: A안)
+- 미커밋 변경을 `luida/handoff/<campaign>` 브랜치에 **WIP 커밋**으로 임시 봉인
+- 이 브랜치는 운반용 봉투 — resume 시 patch로 펼친 뒤 WIP 커밋은 폐기. **main/feature 히스토리 안 더럽힘.**
+- 인프라 추가 0 (이미 쓰는 git remote 활용)
+
+> 향후 외부 스토리지(S3/R2)·P2P가 필요해지면 `HandoffTransport` 인터페이스로 추상화 가능. 기본은 git.
+
+### 14.3 무엇이 봉인되나
+| 항목 | 방법 |
+|---|---|
+| 미커밋 코드 (tracked) | `git diff` patch |
+| 미커밋 파일 (untracked) | 번들에 파일 내용 포함 (`git status --porcelain` 기준) |
+| campaign/quest 진행 상태 | `.luida-handoff.json` (resume 시 id 재매핑하며 import) |
+| 대화 맥락 | 관련 memory 청크 export → resume 시 머지 |
+| (선택) Claude transcript | `--include-transcript` |
+
+`node_modules`·build 산출물은 봉인 안 함 → resume 기기에서 재설치.
+
+### 14.4 프로토콜
+```
+A 노트북                                  B 노트북
+luida adventure suspend <campaign>        luida adventure resume <campaign>
+  1. worktree 미커밋 수집                    1. handoff 브랜치 fetch
+     (tracked diff + untracked 파일)        2. wt c "<원래 branch>" (origin/main 기준)
+  2. WIP 커밋 → luida/handoff/<campaign>     3. patch 펼침 → A 미커밋 상태 바이트 복원
+  3. .luida-handoff.json 첨부 커밋            4. .luida-handoff.json import (id 재매핑)
+     (campaign+quests+inmail+events          5. owner = B 로 이전, handoff_state=resumed
+      +memory 청크 +worklog 요약)             6. WIP 커밋 폐기 → 이어서 진행
+  4. git push                               
+  5. owner=suspended (A는 읽기전용 잠금)        마무리: 정식 commit/push 또는 다시 suspend
+```
+
+### 14.5 single owner 잠금
+- `campaigns.owner_machine` + `campaigns.handoff_state` (`active` | `suspended` | `resumed`)
+- `machine_id`: hostname 또는 `~/.luida/machine-id` 파일
+- suspend 안 한 campaign을 다른 기기가 resume 시도 → 경고 + `--force` 옵션
+- 동시 진행 사고 차단: 한 시점에 한 머신만 `active`
+
+### 14.6 데이터·행위·CLI
+```sql
+ALTER TABLE campaigns ADD COLUMN owner_machine TEXT;
+ALTER TABLE campaigns ADD COLUMN handoff_state TEXT DEFAULT 'active';
+  -- 'active' | 'suspended' | 'resumed'
+```
+- **행위** `handoff.bundle` (simple tier): suspend 시 "어디까지 했는지" worklog 요약 자동 작성 → 기존 수동 worklog 관습의 자동화
+- **CLI** (사용자 노출은 모험 메타포):
+  ```
+  luida adventure suspend <campaign>   # 내부: handoff push
+  luida adventure resume <campaign>    # 내부: handoff pull
+  luida adventure status               # 어느 기기에 중단 세이브가 있는지
+  ```
+- **UI 카피**:
+  - 중단: "🏕 집 노트북에서 모험을 잠시 멈췄습니다. 다른 곳에서 이어갈 수 있어요."
+  - 재개: "⚔ 회사 노트북에서 중단된 모험을 이어받았습니다. (집 노트북은 이 모험이 잠깁니다)"
+  - 충돌: "⚠ 이 모험은 집 노트북에서 아직 진행 중입니다. 먼저 그쪽에서 중단(suspend)해주세요."
+
+### 14.7 안전·엣지케이스
+- **tavern.db 직접 동기화 금지** — SQLite WAL 손상 위험. 항상 번들(.luida-handoff.json)만 운반.
+- resume 시 worktree가 이미 있으면 (같은 branch) → 사용자 확인 후 덮어쓰기 or 별도 worktree
+- suspend 중 네트워크 실패 → WIP 커밋은 로컬에 남으므로 재시도 가능 (멱등)
+- transcript 옵션은 민감정보 포함 가능 → 기본 off, 명시 opt-in + 시크릿 마스킹(`maskSecrets`) 통과
+
+### 14.8 Phase
+**V2-P12** (의존: V2-P3 campaigns) — suspend/resume 프로토콜 + owner 잠금 + 번들 import/export. transport는 git 고정, 인터페이스로 추상화 여지만 남김.
+
+---
+
 ## 13. 외부 참고 — OpenHuman ([github.com/tinyhumansai/openhuman](https://github.com/tinyhumansai/openhuman), GPL-3.0)
 
 차용한 개념과 Luida 매핑:
@@ -462,3 +545,4 @@ TUI(V2-P0~P5) → Web 포팅 → **Tauri 래핑(V2-P9)**. TUI 없이 Tauri부터
 | 2026-05-28 | 0.1 | 최초 draft — 행위 분류 + agents.json + Phase 분해 |
 | 2026-05-28 | 0.2 | UI 표면 순서(TUI→Tauri) + V2-P9 Tauri 패키징 §12 추가 |
 | 2026-05-28 | 0.3 | OpenHuman 차용 — Memory Tree·Obsidian vault(§6.1) + TokenJuice(§5.4) + ollama runtime + V2-P10/P11 + §13 |
+| 2026-05-28 | 0.4 | 모험 중단·재개(Suspend/Resume) §14 + V2-P12 — git handoff 브랜치, single owner 잠금, 미커밋 통째 이전 |
