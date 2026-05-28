@@ -55,6 +55,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0003_quest_deps.sql",
         include_str!("../migrations/0003_quest_deps.sql"),
     ),
+    (
+        "0004_memory_chunks.sql",
+        include_str!("../migrations/0004_memory_chunks.sql"),
+    ),
 ];
 
 /// 미적용 마이그레이션을 순서대로 적용. 적용된 이름 목록을 반환 (idempotent).
@@ -110,6 +114,7 @@ mod tests {
                 "0001_init.sql".to_string(),
                 "0002_v2_core.sql".to_string(),
                 "0003_quest_deps.sql".to_string(),
+                "0004_memory_chunks.sql".to_string(),
             ]
         );
 
@@ -137,7 +142,7 @@ mod tests {
         let mut conn = open_memory().unwrap();
         let first = migrate(&mut conn).unwrap();
         let second = migrate(&mut conn).unwrap();
-        assert_eq!(first.len(), 3);
+        assert_eq!(first.len(), 4);
         assert_eq!(second.len(), 0);
     }
 }

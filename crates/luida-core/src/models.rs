@@ -134,6 +134,19 @@ pub struct Relationship {
     pub created_at: EpochMs,
 }
 
+/// Memory Tree 노드 (계층 요약 트리). level 0=leaf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryChunk {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub level: i64,
+    pub score: Option<f64>,
+    pub token_estimate: i64,
+    pub path: Option<String>,
+    pub summary: String,
+    pub created_at: EpochMs,
+}
+
 pub const RELATIONSHIP_TRIGGERS: &[&str] =
     &["path_changed", "quest_completed", "tag_pushed"];
 pub const RELATIONSHIP_ACTIONS: &[&str] = &["auto_dispatch", "propose"];

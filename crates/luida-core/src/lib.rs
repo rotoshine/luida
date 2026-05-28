@@ -11,11 +11,11 @@ pub mod repo;
 pub use db::{default_db_path, migrate, now_ms, open_db, open_memory};
 pub use rusqlite::Connection;
 pub use models::{
-    Campaign, Event, Inmail, Project, Quest, Relationship, EpochMs,
+    Campaign, Event, Inmail, MemoryChunk, Project, Quest, Relationship, EpochMs,
 };
 pub use repo::{
-    CampaignRepo, EnqueueResult, EventRepo, InmailRepo, NewCampaign, NewEvent,
-    NewInmail, NewQuest, NewRelationship, ProjectRepo, QuestInsert, QuestRepo,
+    CampaignRepo, EnqueueResult, EventRepo, InmailRepo, MemoryChunkRepo, NewCampaign, NewEvent,
+    NewInmail, NewMemoryChunk, NewQuest, NewRelationship, ProjectRepo, QuestInsert, QuestRepo,
     RelationshipRepo,
 };
 pub use agents::{

@@ -3,6 +3,7 @@
 mod campaign;
 mod event;
 mod inmail;
+mod memory_chunk;
 mod project;
 mod quest;
 mod relationship;
@@ -10,6 +11,7 @@ mod relationship;
 pub use campaign::{CampaignRepo, NewCampaign};
 pub use event::{EventRepo, NewEvent};
 pub use inmail::{EnqueueResult, InmailRepo, NewInmail};
+pub use memory_chunk::{MemoryChunkRepo, NewMemoryChunk};
 pub use project::ProjectRepo;
 pub use quest::{NewQuest, QuestInsert, QuestRepo};
 pub use relationship::{NewRelationship, RelationshipRepo};

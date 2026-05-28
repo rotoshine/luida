@@ -466,7 +466,9 @@ campaign의 모든 quest 종료
 > - ✅ **TUI 패널** — Projects/Campaigns/Quests 탭 + escalation 판단대기 카운트 (Dashboard 로더 단위테스트). `docs/reviews/v2-p7.md`
 > - ✅ **V2-P12** Suspend/Resume — 핸드오프 번들(JSON) + owner 잠금 + `luida adventure suspend/resume`. `docs/reviews/v2-p8.md` (미커밋 코드 git transport는 후속)
 > - ✅ **V2-P10** TokenJuice — `compress_context`(예산 내 정리→char-safe 절단), ingest에 적용. `docs/reviews/v2-p9.md`
-> - ⏳ **후속 UI/고급** — server POST command API, PTY interactive(P6), Memory Tree(P11), Tauri(P9), handoff git transport
+> - ✅ **V2-P11** Memory Tree — `memory_chunks`(migration 0004) + 청크화·계층 요약 트리(요약함수 주입). `docs/reviews/v2-p10.md`
+> - ✅ **서버 쓰기 명령** — POST /api/projects (ADR-0002 command API 시작)
+> - ⏳ **후속(환경 제약/대형)** — learning.reflect LLM 통합, PTY interactive(P6), Tauri(P9), handoff git transport, LLM-트리거 서버 엔드포인트
 > - ✅ (선행) `luida-server` axum HTTP/SSE 브리지(ADR-0002)
 >
 > 전체 게이트: `cargo clippy -D warnings` 0 warning · `cargo test` **122 pass** · 8 crate
@@ -706,3 +708,4 @@ luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
 | 2026-05-28 | 0.13 | **V2-P8 + CLI 배선** — project.ingest + `luida campaign/quest/project ingest` 명령으로 전 엔진 end-to-end. 실 런타임 factory(runtime_for_kind)·WorktrunkProvider·MemoryVault 주입. 전체 122 test |
 | 2026-05-28 | 0.14 | **TUI 패널 + V2-P12 Suspend/Resume** — TUI Projects/Campaigns/Quests 탭. handoff 번들(JSON)+owner 잠금+`luida adventure suspend/resume`. 전체 132 test |
 | 2026-05-28 | 0.15 | **V2-P10 TokenJuice** — compress_context(정리→char-safe 절단), ingest 적용. 전체 139 test |
+| 2026-05-28 | 0.16 | **server POST /api/projects + V2-P11 Memory Tree** — memory_chunks(migration 0004) + 청크화·계층 요약 트리(요약함수 주입). 전체 152 test |
