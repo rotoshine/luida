@@ -6,6 +6,7 @@
 mod config;
 mod resolver;
 mod runtime;
+mod tokenjuice;
 
 pub use config::{
     default_agents_path, ActionConfig, AgentsConfig, Defaults, RuntimeDef, RuntimeModels,
@@ -16,3 +17,4 @@ pub use runtime::{
     AgentEvent, AgentInvocation, AgentOutcome, AgentRuntime, ScriptedRuntime,
     ESCALATION_CATEGORIES,
 };
+pub use tokenjuice::compress_context;

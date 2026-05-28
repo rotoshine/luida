@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use luida_core::agents::{AgentInvocation, AgentRuntime, ResolvedAgent};
+use luida_core::agents::{compress_context, AgentInvocation, AgentRuntime, ResolvedAgent};
 use luida_core::{resolve, AgentsConfig, Connection, EventRepo, NewEvent, ProjectRepo};
 
 use crate::memory::MemoryVault;
@@ -28,7 +28,8 @@ where
         .get(project_name)?
         .with_context(|| format!("프로젝트 '{project_name}' 미등록"))?;
 
-    let blob = gather_repo_context(Path::new(&project.repo_path));
+    // 수집 컨텍스트를 TokenJuice로 예산 내 압축 (큰 README·구조 대비).
+    let blob = compress_context(&gather_repo_context(Path::new(&project.repo_path)), 6_000);
 
     let resolved = resolve(cfg, "project.ingest", Some(project_name))?;
     let inv = AgentInvocation {
