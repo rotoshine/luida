@@ -24,6 +24,11 @@ const DOCS: Doc[] = [
     title: 'ADR-0001 — Rust vs TypeScript',
     path: 'docs/adr/0001-rust-vs-typescript-for-v2.md',
   },
+  {
+    id: 'adr2',
+    title: 'ADR-0002 — 프론트엔드·브리지',
+    path: 'docs/adr/0002-frontend-bridge-architecture.md',
+  },
 ];
 
 function b64(s: string): string {

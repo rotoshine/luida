@@ -30,36 +30,37 @@ v2는 **cmux 의존을 완전히 제거**하고 Luida가 스스로:
 
 ---
 
-## 2. 아키텍처 개요
+## 2. 아키텍처 개요 (ADR-0001 Rust core + ADR-0002 daemon·client)
 
 ```
-┌─ Luida 앱 (Tauri 데스크탑 / TUI) ──────────────────────────┐
-│                                                            │
-│  모험지 등록 메뉴   원정 입력   진행 모니터   모험의 서          │
-│        │              │            │            │            │
-│        ▼              ▼            ▼            ▼            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │  Luida Core (Bun) — tavern.db + agents.json          │  │
-│  │   projects · campaigns · quests · events · memory    │  │
-│  └───────────────┬──────────────────────────────────────┘  │
-│                  │ Agent Resolver (행위 → 런타임/모델)        │
-│        ┌─────────┼──────────┬───────────┬─────────────┐     │
-│        ▼         ▼          ▼           ▼             ▼     │
-│   Planner    Worker     Reviewer   Escalator     Reporter  │
-│   (opus)     (sonnet)   (opus)     (opus)        (sonnet)  │
-│        └─────────┴──────────┴───────────┴─────────────┘     │
-│                  │ AgentRuntime adapter                      │
-│        ┌─────────┴──────────┬───────────┐                   │
-│        ▼                    ▼           ▼                   │
-│   ClaudeRuntime       CodexRuntime  DeepseekRuntime         │
-│   (claude -p)         (codex)       (API/CLI)               │
-│                  │                                           │
-│                  ▼ 각 worker는 worktrunk worktree에서 PTY로 실행 │
-│   ~/workspace/<project>/.worktrees/<branch>                 │
-└────────────────────────────────────────────────────────────┘
+                  ┌──────────────────────────────────────────────┐
+   클라이언트       │  luida-server (Rust core daemon)             │
+  ┌──────────┐    │   tavern.db(rusqlite) + agents.json          │
+  │ TUI       │    │   projects·campaigns·quests·events·memory    │
+  │ (ratatui) │───▶│                                              │
+  │  *현재 core│    │   Agent Resolver (행위 → 런타임/모델)          │
+  │   직접임베드│    │        ┌──────┬──────┬───────┬──────────┐    │
+  └──────────┘    │        ▼      ▼      ▼       ▼          ▼    │
+  ┌──────────┐    │   Planner Worker Reviewer Escalator Reporter │
+  │ Tauri GUI │    │   (opus) (sonnet)(opus)  (opus)   (sonnet)  │
+  │ (React)   │───▶│        └──────┴──────┴───────┴──────────┘    │
+  │ HTTP/SSE  │    │                  │ AgentRuntime adapter       │
+  └──────────┘    │        ┌─────────┴────────┐                   │
+  ┌──────────┐    │        ▼                  ▼                   │
+  │(향후)Ink  │    │   claude-cli          codex-cli (로컬 CLI)    │
+  │ HTTP/SSE  │───▶│   (claude -p / PTY)   (codex exec)           │
+  └──────────┘    │        │ worktrunk worktree에서 실행            │
+                  │        ▼ ~/workspace/<project>/.worktrees/<b> │
+                  │   로컬 HTTP REST + SSE + command API (axum)   │
+                  └──────────────────────────────────────────────┘
 ```
 
-핵심: **터미널 에뮬레이터를 제어하지 않는다.** worker는 (a) headless(`claude -p`)거나 (b) 우리가 소유한 PTY. 라이브 보기는 PTY 출력을 Ink/xterm.js에 렌더.
+핵심 (ADR-0001/0002):
+- **core는 Rust daemon(`luida-server`)**, tavern.db 단일 진실. HTTP/SSE로 클라이언트 서빙.
+- **클라이언트**: Tauri GUI(React, HTTP/SSE) + TUI(ratatui, 현재 core 직접 임베드) + 향후 Ink(HTTP/SSE). 둘 다 제공.
+- **타입 동기화**: `ts-rs`로 Rust 구조체 → TS 타입 생성 (API 경계).
+- **터미널 에뮬레이터를 제어하지 않는다** (Ghostty ❌). worker는 headless(`claude -p`)거나 우리가 소유한 **PTF(portable-pty)**. 라이브 보기는 PTY 출력을 ratatui/xterm.js에 렌더.
+- TUI=ratatui 유지, Ink 전환은 Tauri GUI 완성 후 재검토.
 
 ---
 
@@ -609,7 +610,8 @@ luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
 │   ├── luida-sidecar/       (worktree, worker spawn, guards)
 │   ├── luida-brain/         (daemon, reflect, memory tree, promote)
 │   ├── luida-planner/       (campaign.plan, DAG)
-│   ├── luida-tui/           (ratatui)
+│   ├── luida-server/        (axum — HTTP REST + SSE + command. brain 통합. ADR-0002)
+│   ├── luida-tui/           (ratatui — 현재 core 직접 임베드)
 │   ├── luida-mcp/           (stdio JSON-RPC MCP server)
 │   └── luida-cli/           (단일 바이너리 진입점 `luida`)
 └── packages/web/            (React frontend — 그대로 유지, Tauri가 로드)
@@ -624,10 +626,12 @@ luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
 | @luida/sidecar | `luida-sidecar` | `tokio::process`, `portable-pty` (interactive) |
 | @luida/brain | `luida-brain` | `tokio` (daemon), `rusqlite` |
 | (신규) planner | `luida-planner` | core + runtimes |
-| @luida/ui (Ink) | `luida-tui` | **`ratatui`** + `crossterm` |
+| @luida/ui (Ink) | `luida-tui` | **`ratatui`** + `crossterm` (Ink 전환은 후속 재검토) |
+| (신규) HTTP daemon | `luida-server` | **`axum`** + `tokio` (REST + SSE). 클라이언트 브리지 |
 | @luida/mcp | `luida-mcp` | stdio JSON-RPC (자체) |
 | @luida/cli | `luida-cli` | `clap` (인자 파싱) |
-| @luida/web | `packages/web` | React/Vite (변경 없음) + `tauri` 2.0 |
+| @luida/web | `packages/web` | React/Vite (변경 없음) + `tauri` 2.0 → luida-server HTTP 클라이언트 |
+| (타입 브리지) | `ts-rs` derive on core types | Rust → TS 타입 생성 (`bindings/`) |
 
 ### 15.3 실행 모드 → Rust 매핑
 - **headless**: `tokio::process::Command`로 `claude -p` / `codex exec` spawn, stdout NDJSON 파싱
@@ -677,3 +681,4 @@ luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
 | 2026-05-28 | 0.5 | 런타임 정책 확정 — claude·codex 로컬 CLI 전제(1급), openai-compatible(deepseek/ollama)은 backlog(`enabled:false`) + CLI 가용성 체크 |
 | 2026-05-28 | 0.6 | 실행 모드 §5.5 (headless/interactive 둘 다 지원) + headless 추가입력 사이클 §5.6 + escalation 마커 규약 확정 + §7.4 두 모드 커버 |
 | 2026-05-28 | 0.7 | **언어 확정 = Rust (ADR-0001 Accepted)**. §15 Rust 스택 매핑(crate 구조·의존·4-게이트 갱신) 추가. v1은 git tag 보존 |
+| 2026-05-28 | 0.8 | **브리지 확정 (ADR-0002)**: Rust daemon(`luida-server`, axum)+HTTP/SSE, 양 UI 클라이언트. TUI=ratatui 유지(Ink 후속). Tauri GUI=React(DOM). ts-rs 타입 동기화. §2 아키텍처·§15 갱신 |
