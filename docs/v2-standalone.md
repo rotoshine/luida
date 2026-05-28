@@ -7,6 +7,9 @@
 | **Last updated** | 2026-05-28 |
 | **선행** | Phase 0~5 + Web Track A/B + 운영(A~E) 완료 |
 | **목표** | cmux 의존 제거 → self-contained 오케스트레이터. 다중 프로젝트 자동 계획(원정) + 행위별 멀티 런타임/모델 |
+| **구현 언어** | **Rust** (ADR-0001 Accepted). core/brain/sidecar/TUI(ratatui)/Tauri = Rust, web frontend만 React |
+
+> **언어 결정 (ADR-0001)**: v2는 **Rust**로 전면 재작성. v1(TS)은 `git tag v1-typescript`로 보존된 청사진. tavern.db 스키마는 동일 유지(데이터 호환). 아래 문서의 패키지명(`@luida/*`)·인터페이스(TS 시그니처)는 **개념 명세**이며, 실제 구현은 §15 Rust 스택 매핑을 따른다.
 
 ---
 
@@ -592,6 +595,61 @@ ALTER TABLE campaigns ADD COLUMN handoff_state TEXT DEFAULT 'active';
 
 ---
 
+## 15. Rust 스택 매핑 (ADR-0001 Accepted)
+
+v2는 Rust로 구현한다. 위 문서의 TS 인터페이스/패키지명은 **개념 명세**이며, 실제는 아래로 매핑.
+
+### 15.1 워크스페이스 (Cargo)
+```
+luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
+├── Cargo.toml               (workspace)
+├── crates/
+│   ├── luida-core/          (tavern.db, schema, repo, validators, agents resolver, tokenjuice)
+│   ├── luida-runtimes/      (AgentRuntime: claude-cli, codex-cli. openai-compatible backlog)
+│   ├── luida-sidecar/       (worktree, worker spawn, guards)
+│   ├── luida-brain/         (daemon, reflect, memory tree, promote)
+│   ├── luida-planner/       (campaign.plan, DAG)
+│   ├── luida-tui/           (ratatui)
+│   ├── luida-mcp/           (stdio JSON-RPC MCP server)
+│   └── luida-cli/           (단일 바이너리 진입점 `luida`)
+└── packages/web/            (React frontend — 그대로 유지, Tauri가 로드)
+    └── src-tauri/           (Tauri = luida-core를 임베드한 Rust 앱)
+```
+
+### 15.2 crate 매핑
+| 개념(TS) | Rust crate | 핵심 의존 |
+|---|---|---|
+| @luida/core | `luida-core` | `rusqlite`, `serde`, `serde_json`, `serde_yaml` |
+| @luida/runtimes | `luida-runtimes` | `tokio::process` (claude/codex spawn), `tokio` |
+| @luida/sidecar | `luida-sidecar` | `tokio::process`, `portable-pty` (interactive) |
+| @luida/brain | `luida-brain` | `tokio` (daemon), `rusqlite` |
+| (신규) planner | `luida-planner` | core + runtimes |
+| @luida/ui (Ink) | `luida-tui` | **`ratatui`** + `crossterm` |
+| @luida/mcp | `luida-mcp` | stdio JSON-RPC (자체) |
+| @luida/cli | `luida-cli` | `clap` (인자 파싱) |
+| @luida/web | `packages/web` | React/Vite (변경 없음) + `tauri` 2.0 |
+
+### 15.3 실행 모드 → Rust 매핑
+- **headless**: `tokio::process::Command`로 `claude -p` / `codex exec` spawn, stdout NDJSON 파싱
+- **interactive**: `portable-pty`(wezterm)로 PTY 소유 → `ratatui`/xterm.js 렌더 (§5.5)
+
+### 15.4 데이터 호환
+- tavern.db 스키마는 v1과 동일 + v2 마이그레이션(projects/campaigns/quests 컬럼). `rusqlite`로 동일 SQL 적용
+- migrations/*.sql 파일은 언어 무관 → 그대로 재사용
+
+### 15.5 테스트
+- `cargo test` + `cargo clippy`(린트) + `cargo fmt`
+- v1의 테스트 시나리오(215건)를 Rust 테스트로 이식 — 동작 동치성 검증
+
+### 15.6 4-게이트 규약 (v2용 갱신)
+기존 typecheck/test → Rust 대응:
+1. `cargo clippy -- -D warnings` (0 warning) + `cargo build`
+2. `cargo test` (전체 pass)
+3. 셀프 리뷰 문서 `docs/reviews/v2-pN.md`
+4. 셀프 리뷰 에이전트 + 완료 선언
+
+---
+
 ## 13. 외부 참고 — OpenHuman ([github.com/tinyhumansai/openhuman](https://github.com/tinyhumansai/openhuman), GPL-3.0)
 
 차용한 개념과 Luida 매핑:
@@ -618,3 +676,4 @@ ALTER TABLE campaigns ADD COLUMN handoff_state TEXT DEFAULT 'active';
 | 2026-05-28 | 0.4 | 모험 중단·재개(Suspend/Resume) §14 + V2-P12 — git handoff 브랜치, single owner 잠금, 미커밋 통째 이전 |
 | 2026-05-28 | 0.5 | 런타임 정책 확정 — claude·codex 로컬 CLI 전제(1급), openai-compatible(deepseek/ollama)은 backlog(`enabled:false`) + CLI 가용성 체크 |
 | 2026-05-28 | 0.6 | 실행 모드 §5.5 (headless/interactive 둘 다 지원) + headless 추가입력 사이클 §5.6 + escalation 마커 규약 확정 + §7.4 두 모드 커버 |
+| 2026-05-28 | 0.7 | **언어 확정 = Rust (ADR-0001 Accepted)**. §15 Rust 스택 매핑(crate 구조·의존·4-게이트 갱신) 추가. v1은 git tag 보존 |

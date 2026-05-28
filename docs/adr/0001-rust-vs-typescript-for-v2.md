@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Proposed (결정 대기) |
+| **Status** | **Accepted — Option A (전면 Rust v2)** (2026-05-28) |
 | **Date** | 2026-05-28 |
 | **Decision makers** | Roto |
 | **선행** | v1(TS/Bun) Phase 0~5 + A~E 완료. v2 설계(`v2-standalone.md` v0.6) |
@@ -125,12 +125,22 @@ v1은 TypeScript + Bun으로 구현되어 동작·검증됨(215 tests). v2는 cm
 
 ## 6. 결정
 
-> **(대기)** — 사용자 확정 후 Status를 Accepted/Rejected로 변경하고 v2-standalone.md에 언어 확정 반영.
+> **Accepted: Option A — 전면 Rust v2** (2026-05-28)
 
 선택지:
-- [ ] A 전면 Rust v2 (권고)
+- [x] **A 전면 Rust v2** (확정)
 - [ ] B 하이브리드
 - [ ] C 전면 TS 유지
+
+조건 충족 확인:
+- (a) Rust 유지보수 의향 — ✅ 사용자 확인 (2026-05-28)
+- (b) 개발 속도 저하 감수 — ✅ (설계 v0.6로 충분히 굳음)
+- (c) web frontend React 잔존 수용 — ✅ (Rust core + React = 정상 구성)
+
+위험 완화 적용:
+- v1 TS는 `git tag v1-typescript`로 보존 후 v2를 Rust 워크스페이스로 시작
+- v2 Rust는 동일 tavern.db 스키마 사용 (데이터 호환)
+- V2-P0를 Rust로 먼저 만들어 개발 속도 실측 (early exit 지점)
 
 ---
 
