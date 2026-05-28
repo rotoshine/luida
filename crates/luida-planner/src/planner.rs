@@ -10,7 +10,10 @@ use luida_core::{
     resolve, AgentsConfig, CampaignRepo, Connection, EventRepo, NewCampaign, NewEvent, NewQuest,
     ProjectRepo, QuestRepo,
 };
-use luida_sidecar::{dispatch_quest, DispatchOutcome, WorktreeProvider};
+use luida_sidecar::{
+    dispatch_quest, notify_user_escalation, resume_quest, triage_escalation, DispatchOutcome,
+    WorktreeProvider, MAX_AUTO_RESUME,
+};
 
 use crate::plan::CampaignPlan;
 
@@ -50,6 +53,7 @@ where
         cwd: None,
         session_id: None,
         system_context: None,
+        resume: false,
     };
     let runtime = runtime_factory(&resolved).context("플래너 런타임 생성 실패")?;
     let outcome = runtime.run(&resolved.model, &inv, &mut |_| {})?;
@@ -146,9 +150,27 @@ where
             break;
         }
         for q in ready {
-            match dispatch_quest(conn, cfg, q.id, worktree, &runtime_factory)? {
+            let mut outcome = dispatch_quest(conn, cfg, q.id, worktree, &runtime_factory)?;
+            // escalation → triage로 분류. 사소하면 자동 답변으로 재개(횟수 제한).
+            let mut attempts = 0u32;
+            while matches!(outcome, DispatchOutcome::NeedsInput { .. }) {
+                let decision = triage_escalation(conn, cfg, q.id, &runtime_factory)?;
+                if decision.ask_user || attempts >= MAX_AUTO_RESUME {
+                    break;
+                }
+                let Some(answer) = decision.auto_answer.clone() else {
+                    break;
+                };
+                attempts += 1;
+                outcome = resume_quest(conn, cfg, q.id, &answer, &runtime_factory)?;
+            }
+            match outcome {
                 DispatchOutcome::Completed { .. } => report.completed.push(q.id),
-                DispatchOutcome::NeedsInput { .. } => report.needs_input.push(q.id),
+                DispatchOutcome::NeedsInput { .. } => {
+                    // 자동 해소 실패 → 사용자에게 비방해 알림(멱등).
+                    notify_user_escalation(conn, q.id)?;
+                    report.needs_input.push(q.id);
+                }
                 DispatchOutcome::Failed { .. } => report.failed.push(q.id),
             }
         }
@@ -300,24 +322,74 @@ mod tests {
     }
 
     #[test]
-    fn run_campaign_pauses_on_needs_input() {
+    fn run_campaign_pauses_on_needs_input_when_triage_asks_user() {
         let mut conn = setup();
         let cid = plan_campaign(&mut conn, &cfg(), "p", result_factory(PLAN)).unwrap();
-        // 모든 디스패치가 escalation → 첫 quest(a)에서 멈춤, b는 차단
-        let esc_factory = |_: &ResolvedAgent| {
-            Ok(Box::new(ScriptedRuntime::new(vec![AgentEvent::Escalation {
-                category: "ambiguous_spec".into(),
-                message: "어느 것?".into(),
-            }])) as Box<dyn AgentRuntime>)
+        // execute는 escalation, triage는 ask_user=true → 자동 재개 안 함, a에서 멈춤.
+        let f = |r: &ResolvedAgent| -> Result<Box<dyn AgentRuntime>> {
+            let events = if r.action == "escalation.triage" {
+                vec![AgentEvent::Result {
+                    success: true,
+                    summary: Some(r#"{"ask_user": true, "reason": "위험"}"#.into()),
+                }]
+            } else {
+                vec![AgentEvent::Escalation {
+                    category: "design_mismatch".into(),
+                    message: "어느 것?".into(),
+                }]
+            };
+            Ok(Box::new(ScriptedRuntime::new(events)) as Box<dyn AgentRuntime>)
         };
-        let report = run_campaign(&mut conn, &cfg(), cid, &FakeWorktree, esc_factory).unwrap();
+        let report = run_campaign(&mut conn, &cfg(), cid, &FakeWorktree, f).unwrap();
         assert_eq!(report.needs_input.len(), 1);
         assert!(report.completed.is_empty());
         assert!(!report.all_completed);
-        let c = CampaignRepo::new(&conn).get(cid).unwrap().unwrap();
-        assert_eq!(c.status, "needs_input");
+        assert_eq!(
+            CampaignRepo::new(&conn).get(cid).unwrap().unwrap().status,
+            "needs_input"
+        );
+        // 사용자 알림이 발행됨
+        assert_eq!(
+            luida_core::InmailRepo::new(&conn).pending_for("@user").unwrap().len(),
+            1
+        );
         // b는 a 미완으로 pending 유지
         let quests = QuestRepo::new(&conn).list_for_campaign(cid).unwrap();
         assert!(quests.iter().any(|q| q.status == "pending"));
+    }
+
+    #[test]
+    fn run_campaign_auto_resolves_trivial_escalation() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let mut conn = setup();
+        let cid = plan_campaign(&mut conn, &cfg(), "p", result_factory(PLAN)).unwrap();
+        // quest.execute: 첫 호출은 escalation, 이후 success. triage: auto_answer 제공.
+        let exec_calls = Arc::new(AtomicU32::new(0));
+        let f = move |r: &ResolvedAgent| -> Result<Box<dyn AgentRuntime>> {
+            let events = if r.action == "escalation.triage" {
+                vec![AgentEvent::Result {
+                    success: true,
+                    summary: Some(r#"{"ask_user": false, "auto_answer": "옵션 A로", "reason": "사소"}"#.into()),
+                }]
+            } else if exec_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                vec![AgentEvent::Escalation {
+                    category: "ambiguous_spec".into(),
+                    message: "어느 것?".into(),
+                }]
+            } else {
+                vec![AgentEvent::Result {
+                    success: true,
+                    summary: Some("done".into()),
+                }]
+            };
+            Ok(Box::new(ScriptedRuntime::new(events)) as Box<dyn AgentRuntime>)
+        };
+        let report = run_campaign(&mut conn, &cfg(), cid, &FakeWorktree, f).unwrap();
+        // a는 escalation→triage(auto)→resume→완료, b도 완료
+        assert_eq!(report.completed.len(), 2);
+        assert!(report.needs_input.is_empty());
+        assert!(report.all_completed);
     }
 }

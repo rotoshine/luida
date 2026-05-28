@@ -15,6 +15,9 @@ pub struct AgentInvocation {
     pub cwd: Option<PathBuf>,
     pub session_id: Option<String>,
     pub system_context: Option<String>,
+    /// true면 기존 세션 재개(`--resume`). false면 새 세션(`--session-id`).
+    /// escalation 응답을 직전 맥락에 이어 주입할 때 사용 (spec §5.6).
+    pub resume: bool,
 }
 
 /// worker stream 이벤트 (stream-json 단순화 + escalation).

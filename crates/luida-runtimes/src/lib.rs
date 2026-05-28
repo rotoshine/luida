@@ -137,8 +137,13 @@ impl AgentRuntime for ClaudeCliRuntime {
             .arg("stream-json")
             .arg("--model")
             .arg(model);
+        // resume이면 --resume(직전 맥락 이어받기), 아니면 --session-id(새 세션).
         if let Some(sid) = &inv.session_id {
-            cmd.arg("--session-id").arg(sid);
+            if inv.resume {
+                cmd.arg("--resume").arg(sid);
+            } else {
+                cmd.arg("--session-id").arg(sid);
+            }
         }
         cmd.arg(&inv.prompt);
         run_cli_streaming(cmd, inv.cwd.as_deref(), on_event)

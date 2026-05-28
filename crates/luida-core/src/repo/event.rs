@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::db::now_ms;
 use crate::models::Event;
@@ -36,6 +36,20 @@ impl<'a> EventRepo<'a> {
              FROM events WHERE occurred_at >= ?1 ORDER BY occurred_at DESC LIMIT ?2",
             params![since_ms, limit],
         )
+    }
+
+    /// 특정 quest의 가장 최근 `kind` 이벤트 payload (없으면 None).
+    pub fn latest_payload_for_quest(&self, quest_id: i64, kind: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT payload FROM events
+                 WHERE quest_id = ?1 AND kind = ?2
+                 ORDER BY occurred_at DESC, id DESC LIMIT 1",
+                params![quest_id, kind],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
     }
 
     pub fn by_kind(&self, kind: &str, limit: i64) -> Result<Vec<Event>> {
@@ -119,6 +133,47 @@ mod tests {
         // 미래 시점 기준이면 0건
         let future = now_ms() + 1_000_000;
         assert_eq!(repo.recent_since(future, 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn latest_payload_for_quest_picks_most_recent() {
+        use crate::repo::{NewQuest, ProjectRepo, QuestRepo};
+        let conn = setup();
+        ProjectRepo::new(&conn).add("agora", "/a", "main", None).unwrap();
+        let qid = QuestRepo::new(&conn)
+            .insert(NewQuest {
+                campaign_id: None,
+                project: "agora",
+                brief: "x",
+                branch: None,
+                status: "pending",
+                depends_on_quest_id: None,
+                source_inmail_id: None,
+            })
+            .unwrap();
+        let repo = EventRepo::new(&conn);
+        repo.record(NewEvent {
+            campaign_id: None,
+            quest_id: Some(qid),
+            actor: "a",
+            kind: "quest_needs_input",
+            payload: r#"{"category":"old"}"#,
+        })
+        .unwrap();
+        repo.record(NewEvent {
+            campaign_id: None,
+            quest_id: Some(qid),
+            actor: "a",
+            kind: "quest_needs_input",
+            payload: r#"{"category":"new"}"#,
+        })
+        .unwrap();
+        let p = repo
+            .latest_payload_for_quest(qid, "quest_needs_input")
+            .unwrap()
+            .unwrap();
+        assert!(p.contains("new"));
+        assert!(repo.latest_payload_for_quest(qid, "nope").unwrap().is_none());
     }
 
     #[test]
