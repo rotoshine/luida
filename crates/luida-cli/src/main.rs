@@ -4,8 +4,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use luida_core::agents::{default_agents_path, AgentRuntime, ResolvedAgent};
 use luida_core::{
-    resolve, runtime_available, AgentsConfig, default_db_path, migrate, open_db, CampaignRepo,
-    Connection, ProjectRepo, QuestRepo,
+    machine_id, resolve, resume_bundle, runtime_available, suspend_campaign, AgentsConfig,
+    CampaignRepo, Connection, HandoffBundle, ProjectRepo, QuestRepo, default_db_path, migrate,
+    open_db,
 };
 use luida_brain::{ingest_project, report_campaign, MemoryVault};
 use luida_planner::{plan_campaign, run_campaign};
@@ -63,6 +64,11 @@ enum Cmd {
         #[command(subcommand)]
         action: QuestAction,
     },
+    /// 모험 중단·재개 (기기 간 핸드오프)
+    Adventure {
+        #[command(subcommand)]
+        action: AdventureAction,
+    },
     /// HTTP/SSE 서버 (GUI·클라이언트 브리지)
     Server {
         #[command(subcommand)]
@@ -119,6 +125,23 @@ enum QuestAction {
     Resume { id: i64, answer: String },
     /// escalation을 분류 (자동 해소 가능 여부)
     Triage { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum AdventureAction {
+    /// 원정을 중단하고 핸드오프 번들(JSON) 저장
+    Suspend {
+        id: i64,
+        #[arg(long, default_value = ".luida-handoff.json")]
+        out: String,
+        #[arg(long)]
+        force: bool,
+    },
+    /// 핸드오프 번들에서 원정을 이어받기(재개)
+    Resume {
+        #[arg(long, default_value = ".luida-handoff.json")]
+        from: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -269,6 +292,25 @@ fn main() -> Result<()> {
                     if let Some(a) = d.auto_answer {
                         println!("   자동 답변 후보: {a}");
                     }
+                }
+            }
+        }
+        Cmd::Adventure { action } => {
+            let (mut conn, _cfg) = open_ready(&db_path)?;
+            let machine = machine_id();
+            match action {
+                AdventureAction::Suspend { id, out, force } => {
+                    let bundle = suspend_campaign(&conn, id, &machine, force)?;
+                    std::fs::write(&out, bundle.to_json()?)?;
+                    println!("🏕  원정 #{id} 중단 (기기 {machine}) → {out}");
+                    println!("   다른 기기에서: `luida adventure resume --from {out}`");
+                }
+                AdventureAction::Resume { from } => {
+                    let json = std::fs::read_to_string(&from)?;
+                    let bundle = HandoffBundle::from_json(&json)?;
+                    let origin = bundle.origin_machine.clone();
+                    let cid = resume_bundle(&mut conn, &bundle, &machine)?;
+                    println!("⚔  원정 이어받음 (기기 {machine}) → 새 #{cid} (원본: {origin})");
                 }
             }
         }

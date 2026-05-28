@@ -4,6 +4,7 @@
 
 pub mod agents;
 pub mod db;
+pub mod handoff;
 pub mod models;
 pub mod repo;
 
@@ -19,4 +20,7 @@ pub use repo::{
 };
 pub use agents::{
     default_agents_path, resolve, runtime_available, AgentsConfig, ResolvedAgent,
+};
+pub use handoff::{
+    machine_id, resume_bundle, suspend_campaign, HandoffBundle,
 };
