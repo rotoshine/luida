@@ -463,7 +463,8 @@ campaign의 모든 quest 종료
 > - ✅ **V2-P4** escalation triage(자동해소/사용자게이트) + needs_input 알림 + resume(`--resume`) 사이클. `docs/reviews/v2-p4.md`
 > - ✅ **V2-P5** `luida-brain` — campaign.report + Obsidian 호환 vault(모험의 서). `docs/reviews/v2-p5.md`
 > - ✅ **V2-P8 + CLI 배선** — `project.ingest`(README→맥락 요약) + `luida campaign plan/run/report`·`quest resume/triage`·`project ingest`로 **전 엔진 end-to-end 사용 가능**. `docs/reviews/v2-p6.md`
-> - ⏳ **후속 UI/고급** — server POST command API, TUI campaigns/quests 패널, PTY interactive(P6), TokenJuice(P10), Memory Tree(P11), Suspend/Resume(P12), Tauri(P9)
+> - ✅ **TUI 패널** — Projects/Campaigns/Quests 탭 + escalation 판단대기 카운트 (Dashboard 로더 단위테스트). `docs/reviews/v2-p7.md`
+> - ⏳ **후속 UI/고급** — server POST command API, PTY interactive(P6), TokenJuice(P10), Memory Tree(P11), Suspend/Resume(P12), Tauri(P9)
 > - ✅ (선행) `luida-server` axum HTTP/SSE 브리지(ADR-0002)
 >
 > 전체 게이트: `cargo clippy -D warnings` 0 warning · `cargo test` **122 pass** · 8 crate
