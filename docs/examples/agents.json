@@ -42,23 +42,24 @@
     }
   },
 
+  "_comment_mode": "mode: headless(claude -p, 기본) | interactive(node-pty 영속 세션). headless 추가입력은 escalation→resume 사이클.",
   "actions": {
-    "campaign.plan":     { "runtime": "claude", "tier": "complex" },
-    "quest.execute":     { "runtime": "claude", "tier": "simple" },
-    "quest.review":      { "runtime": "claude", "tier": "complex" },
-    "escalation.triage": { "runtime": "claude", "tier": "complex" },
-    "learning.reflect":  { "runtime": "claude", "tier": "complex" },
-    "merge.resolve":     { "runtime": "claude", "tier": "complex" },
-    "campaign.report":   { "runtime": "claude", "tier": "simple" },
-    "project.ingest":    { "runtime": "claude", "tier": "simple" },
-    "pr.describe":       { "runtime": "claude", "tier": "simple" },
-    "inmail.summarize":  { "runtime": "claude", "tier": "simple" },
-    "handoff.bundle":    { "runtime": "claude", "tier": "simple" }
+    "campaign.plan":     { "runtime": "claude", "tier": "complex", "mode": "headless" },
+    "quest.execute":     { "runtime": "claude", "tier": "simple",  "mode": "headless" },
+    "quest.review":      { "runtime": "claude", "tier": "complex", "mode": "headless" },
+    "escalation.triage": { "runtime": "claude", "tier": "complex", "mode": "headless" },
+    "learning.reflect":  { "runtime": "claude", "tier": "complex", "mode": "headless" },
+    "merge.resolve":     { "runtime": "claude", "tier": "complex", "mode": "headless" },
+    "campaign.report":   { "runtime": "claude", "tier": "simple",  "mode": "headless" },
+    "project.ingest":    { "runtime": "claude", "tier": "simple",  "mode": "headless" },
+    "pr.describe":       { "runtime": "claude", "tier": "simple",  "mode": "headless" },
+    "inmail.summarize":  { "runtime": "claude", "tier": "simple",  "mode": "headless" },
+    "handoff.bundle":    { "runtime": "claude", "tier": "simple",  "mode": "headless" }
   },
 
   "projectOverrides": {
     "community-web-agora": {
-      "quest.execute": { "runtime": "codex", "tier": "complex" }
+      "quest.execute": { "runtime": "codex", "tier": "complex", "mode": "interactive" }
     }
   }
 }

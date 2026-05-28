@@ -247,6 +247,56 @@ export function compressContext(input: string, opts?: CompressOpts): string;
 
 적용 지점: `project.ingest`(대용량 README/schema), `campaign.plan`(다중 프로젝트 맥락), `quest.review`(diff), `learning.reflect`(events 묶음)에서 특히 효과적.
 
+### 5.5 실행 모드 (Execution Mode) — headless vs interactive
+
+worker 실행은 **두 모드**를 모두 지원한다. 행위/프로젝트별로 `agents.json`의 `mode` 필드로 선택 (기본 `headless`).
+
+> **공통**: 두 모드 모두 `wt c "<코드네임>"`으로 worktree를 먼저 만든 뒤 그 안에서 worker를 띄운다. 차이는 worker를 어떻게 띄우고 제어하느냐.
+
+> **Ghostty 직접 제어 ❌**: Ghostty는 외부 제어 API가 없다(그게 cmux가 libghostty 위에 만든 레이어). "세션 살려두고 프롬프트 주입 + 출력 수신"은 **Luida가 소유한 PTY**(node-pty)로 구현하지 Ghostty를 조종하지 않는다. Ghostty는 사용자가 Luida 앱을 띄우는 환경일 뿐.
+
+| 모드 | 띄우는 법 | 맥락 이어짐 | 추가 입력 | 출력 |
+|---|---|---|---|---|
+| **headless** (기본) | `claude -p --session-id <quest>` / `codex exec` | 디스크 transcript (`--resume` reload) | escalation→needs_input→`--resume` 사이클 (§5.6) | stream-json (구조화) |
+| **interactive** | node-pty로 `claude`(REPL) spawn, Luida가 PTY 소유 | live 메모리 (reload 없음) | PTY stdin에 바로 주입 (실시간) | PTY stdout 캡처 → markdown/sqlite, Ink/xterm.js 렌더 |
+
+선택 기준:
+- **headless**: quest 1개가 범위 명확 / escalation·진행 파싱이 깔끔해야 함 / 비용 효율. 대부분의 `quest.execute`.
+- **interactive**: 긴 모험에서 사용자가 자주 끼어듦 / 실시간 조종 / 여러 step 연속. 라이브 모니터링 화면에서 그대로 조작.
+
+`agents.json` 확장:
+```jsonc
+"actions": {
+  "quest.execute": { "runtime": "claude", "tier": "simple", "mode": "headless" }
+}
+```
+
+### 5.6 headless의 추가 입력 — escalation → needs_input → resume 사이클
+
+headless는 실행 도중 stdin을 못 받는다(`-p`는 프롬프트 1개 소비 후 실행). 따라서 추가 입력은 **"종료 → 입력 받음 → 재개"** 비동기 사이클로 처리:
+
+```
+1. claude -p --session-id quest-42 "<brief>" 실행
+2. worker가 판단 필요 → escalation 마커 출력 후 멈춤/종료
+     <<LUIDA_ASK category=design_mismatch>>질문 내용<<END>>
+3. Luida가 stream-json에서 마커 감지 → quest.status = needs_input
+4. escalation.triage(opus)가 분류: 진짜 사용자가 필요한가? (§7.4)
+     - trivial → 기본값으로 자동 결정, 사용자 안 깨움
+     - 진짜 필요 → 비방해 알림 "🍺 모험 중 사건 — agora가 판단을 기다립니다"
+5. 사용자 결정 입력 (TUI/Web/알림)
+6. claude -p --resume quest-42 "<사용자 답변>" → 직전 맥락 그대로 이어서 재개
+```
+
+핵심: `--session-id`/`--resume`이 "프로세스가 죽었다 살아나도" 맥락을 잇는다. 사용자 체감은 "물어봄 → 답하면 이어감"으로 자연스럽고, 실제로는 프로세스 재시작.
+
+**escalation 마커 규약** (모든 런타임 공통, brief 프롬프트에 규약 주입):
+```
+<<LUIDA_ASK category=<system_error|ambiguous_spec|design_mismatch|dangerous_op> >>
+사용자에게 물을 질문
+<<END>>
+```
+- interactive 모드에선 마커 없이도 worker가 자연스럽게 멈춰 물을 수 있음 (PTY 대화). 마커는 headless의 신호 수단.
+
 ---
 
 ## 6. 데이터 모델 (신규/변경)
@@ -352,15 +402,21 @@ TUI/Web 진입 → tavern.db 없으면 자동 init → agents.json 없으면 기
 → 진행 모니터링 (quests/events + PTY 로그 tail)
 ```
 
-### 7.4 escalation (모험 중 사건)
+### 7.4 escalation (모험 중 사건) — 두 모드 공통
 ```
-worker가 escalation 이벤트 emit
+worker가 escalation 신호 emit
+  - headless: <<LUIDA_ASK category=...>> 마커 출력 후 종료 (§5.6)
+  - interactive: PTY에서 멈춰 질문 (자연 대화)
 → escalation.triage 행위 (opus): 카테고리 분류 + 사용자에게 물을지 결정
+   (trivial이면 자동 결정, 사용자 안 깨움)
 → 물어야 하면:
      quest.status = needs_input
      inmail kind='escalation' → UI 비방해 토스트
      "🍺 모험 중 사건 — <project>가 <category>로 판단을 기다립니다"
-→ 사용자 결정 → inmail 회신 → worker resume 또는 abort
+→ 사용자 결정:
+     - headless: claude -p --resume <quest> "<답변>"으로 재개
+     - interactive: PTY stdin에 답변 주입
+   또는 abort
 ```
 
 ### 7.5 완료 + 보고
@@ -407,7 +463,7 @@ v2 UI는 **TUI 먼저 → Tauri 데스크탑 나중**의 순서로 간다:
 ## 9. 미해결 질문 (구현 전 결정)
 
 1. ~~codex/deepseek 실제 호출 규약~~ **[결정됨]** claude·codex는 **로컬 CLI 전제**로 v2 1급 지원. deepseek/ollama(openai-compatible)는 **backlog** (`enabled:false`). codex CLI의 stream 포맷·tool-use 규약 확인은 codex-cli 어댑터 구현 시점(V2-P2)에 진행.
-2. **escalation 마커 규약**: claude worker가 "물어봐야 함"을 어떻게 신호할지. 전용 도구 vs 출력 마커. Claude Code의 ask 패턴과 정합성.
+2. ~~escalation 마커 규약~~ **[결정됨]** `<<LUIDA_ASK category=...>>질문<<END>>` 출력 마커 (headless 신호 수단, brief에 규약 주입). interactive는 PTY 자연 대화. 카테고리: system_error/ambiguous_spec/design_mismatch/dangerous_op. 자세히는 §5.6.
 3. **DAG 동시 실행 한도**: 의존성 없는 quest를 몇 개까지 병렬로? (자원·비용·머지 충돌)
 4. **계획 미리보기 UX**: campaign.plan 결과를 사용자가 어떻게 검토·수정하는지 (전체 수락 vs quest별 편집)
 5. **모델 비용 추적**: 행위별 토큰/비용을 events에 기록해 대시보드에 노출할지
@@ -561,3 +617,4 @@ ALTER TABLE campaigns ADD COLUMN handoff_state TEXT DEFAULT 'active';
 | 2026-05-28 | 0.3 | OpenHuman 차용 — Memory Tree·Obsidian vault(§6.1) + TokenJuice(§5.4) + ollama runtime + V2-P10/P11 + §13 |
 | 2026-05-28 | 0.4 | 모험 중단·재개(Suspend/Resume) §14 + V2-P12 — git handoff 브랜치, single owner 잠금, 미커밋 통째 이전 |
 | 2026-05-28 | 0.5 | 런타임 정책 확정 — claude·codex 로컬 CLI 전제(1급), openai-compatible(deepseek/ollama)은 backlog(`enabled:false`) + CLI 가용성 체크 |
+| 2026-05-28 | 0.6 | 실행 모드 §5.5 (headless/interactive 둘 다 지원) + headless 추가입력 사이클 §5.6 + escalation 마커 규약 확정 + §7.4 두 모드 커버 |
