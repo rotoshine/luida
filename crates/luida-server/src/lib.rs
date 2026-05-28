@@ -11,11 +11,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use luida_core::{CampaignRepo, Connection, InmailRepo, ProjectRepo, QuestRepo};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 /// 공유 상태 — DB connection (Mutex로 Sync 확보).
@@ -42,11 +44,53 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
         .route("/api/stream", get(stream))
+        .route("/api/projects", post(create_project))
         .with_state(state)
 }
 
 async fn health() -> &'static str {
     "OK"
+}
+
+/// 모험지 등록 요청 본문.
+#[derive(Deserialize)]
+struct NewProjectReq {
+    name: String,
+    repo_path: String,
+    base_branch: Option<String>,
+    description: Option<String>,
+}
+
+/// POST /api/projects — 모험지 등록(upsert). command API의 첫 쓰기 엔드포인트.
+async fn create_project(
+    State(state): State<AppState>,
+    Json(req): Json<NewProjectReq>,
+) -> impl IntoResponse {
+    if req.name.trim().is_empty() || req.repo_path.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "name·repo_path는 필수" })),
+        );
+    }
+    let name = req.name.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = lock_recover(&state);
+        ProjectRepo::new(&conn).add(
+            &req.name,
+            &req.repo_path,
+            req.base_branch.as_deref().unwrap_or("main"),
+            req.description.as_deref(),
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => (StatusCode::CREATED, Json(json!({ "ok": true, "name": name }))),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("join error: {e}") })),
+        ),
+    }
 }
 
 /// tavern.db 스냅샷 JSON.
@@ -185,6 +229,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_project_registers_and_appears_in_snapshot() {
+        let state = seeded_state();
+        let app = build_router(state);
+        let body = r#"{"name":"admin","repo_path":"/admin","base_branch":"main"}"#;
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        // snapshot에 2곳(agora seed + admin)
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshot")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["projects"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn create_project_rejects_empty_name() {
+        let app = build_router(seeded_state());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"","repo_path":"/x"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]
