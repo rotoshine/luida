@@ -13,6 +13,10 @@ path = "src/main.rs"
 luida-core = { path = "../luida-core" }
 luida-tui = { path = "../luida-tui" }
 luida-server = { path = "../luida-server" }
+luida-runtimes = { path = "../luida-runtimes" }
+luida-sidecar = { path = "../luida-sidecar" }
+luida-planner = { path = "../luida-planner" }
+luida-brain = { path = "../luida-brain" }
 clap.workspace = true
 anyhow.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

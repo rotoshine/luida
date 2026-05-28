@@ -2,10 +2,28 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use luida_core::agents::default_agents_path;
+use luida_core::agents::{default_agents_path, AgentRuntime, ResolvedAgent};
 use luida_core::{
-    resolve, runtime_available, AgentsConfig, default_db_path, migrate, open_db, ProjectRepo,
+    resolve, runtime_available, AgentsConfig, default_db_path, migrate, open_db, CampaignRepo,
+    Connection, ProjectRepo, QuestRepo,
 };
+use luida_brain::{ingest_project, report_campaign, MemoryVault};
+use luida_planner::{plan_campaign, run_campaign};
+use luida_runtimes::runtime_for_kind;
+use luida_sidecar::{resume_quest, triage_escalation, WorktrunkProvider};
+
+/// 실제 런타임 factory — resolved.kind/command → 로컬 CLI(claude/codex) 런타임.
+fn cli_factory(r: &ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
+    runtime_for_kind(&r.kind, r.command.as_deref())
+}
+
+/// db 열고 마이그레이션 + agents.json 로드.
+fn open_ready(db_path: &std::path::Path) -> Result<(Connection, AgentsConfig)> {
+    let mut conn = open_db(db_path)?;
+    migrate(&mut conn)?;
+    let cfg = AgentsConfig::load_or_default(&default_agents_path())?;
+    Ok((conn, cfg))
+}
 
 #[derive(Parser)]
 #[command(
@@ -34,6 +52,16 @@ enum Cmd {
     Agents {
         #[command(subcommand)]
         action: AgentsAction,
+    },
+    /// 원정(campaign) — 계획·실행·보고
+    Campaign {
+        #[command(subcommand)]
+        action: CampaignAction,
+    },
+    /// 모험(quest) — 재개·triage
+    Quest {
+        #[command(subcommand)]
+        action: QuestAction,
     },
     /// HTTP/SSE 서버 (GUI·클라이언트 브리지)
     Server {
@@ -74,6 +102,26 @@ enum DbAction {
 }
 
 #[derive(Subcommand)]
+enum CampaignAction {
+    /// 사용자 프롬프트 → 원정 DAG 계획 (campaign.plan)
+    Plan { prompt: String },
+    /// 계획된 원정을 의존성 순으로 실행
+    Run { id: i64 },
+    /// 완료 원정 보고서 작성 → 모험의 서
+    Report { id: i64 },
+    /// 진행 중 원정 목록
+    List,
+}
+
+#[derive(Subcommand)]
+enum QuestAction {
+    /// needs_input 모험을 답변으로 재개
+    Resume { id: i64, answer: String },
+    /// escalation을 분류 (자동 해소 가능 여부)
+    Triage { id: i64 },
+}
+
+#[derive(Subcommand)]
 enum ProjectAction {
     /// 모험지 등록 (또는 갱신)
     Add {
@@ -89,6 +137,8 @@ enum ProjectAction {
     List,
     /// 모험지 제거
     Remove { name: String },
+    /// 모험지 맥락 요약 (README/구조 → 모험의 서)
+    Ingest { name: String },
 }
 
 fn main() -> Result<()> {
@@ -110,9 +160,7 @@ fn main() -> Result<()> {
             }
         },
         Cmd::Project { action } => {
-            let mut conn = open_db(&db_path)?;
-            migrate(&mut conn)?;
-            let repo = ProjectRepo::new(&conn);
+            let (mut conn, cfg) = open_ready(&db_path)?;
             match action {
                 ProjectAction::Add {
                     name,
@@ -120,11 +168,11 @@ fn main() -> Result<()> {
                     base,
                     desc,
                 } => {
-                    repo.add(&name, &path, &base, desc.as_deref())?;
+                    ProjectRepo::new(&conn).add(&name, &path, &base, desc.as_deref())?;
                     println!("🗺  모험지 등록: {name} ({base}) → {path}");
                 }
                 ProjectAction::List => {
-                    let projects = repo.list()?;
+                    let projects = ProjectRepo::new(&conn).list()?;
                     if projects.is_empty() {
                         println!("등록된 모험지가 없습니다. `luida project add` 로 등록하세요.");
                     } else {
@@ -146,10 +194,80 @@ fn main() -> Result<()> {
                     }
                 }
                 ProjectAction::Remove { name } => {
-                    if repo.remove(&name)? {
+                    if ProjectRepo::new(&conn).remove(&name)? {
                         println!("🗑  모험지 제거: {name}");
                     } else {
                         println!("그런 모험지가 없습니다: {name}");
+                    }
+                }
+                ProjectAction::Ingest { name } => {
+                    let vault = MemoryVault::default_vault();
+                    let path = ingest_project(&mut conn, &cfg, &name, &vault, cli_factory)?;
+                    println!("📖 모험지 맥락 요약: {name} → {}", path.display());
+                }
+            }
+        }
+        Cmd::Campaign { action } => {
+            let (mut conn, cfg) = open_ready(&db_path)?;
+            match action {
+                CampaignAction::Plan { prompt } => {
+                    let cid = plan_campaign(&mut conn, &cfg, &prompt, cli_factory)?;
+                    let quests = QuestRepo::new(&conn).list_for_campaign(cid)?;
+                    println!("🗺  원정 #{cid} 계획 완료 — quest {}건:", quests.len());
+                    for q in quests {
+                        println!("   q{} [{}] {}: {}", q.id, q.status, q.project, q.brief);
+                    }
+                    println!("   실행: `luida campaign run {cid}`");
+                }
+                CampaignAction::Run { id } => {
+                    let worktree = WorktrunkProvider::default();
+                    let report = run_campaign(&mut conn, &cfg, id, &worktree, cli_factory)?;
+                    println!(
+                        "⚔  원정 #{id} 실행 — 완료 {} / 대기 {} / 실패 {}",
+                        report.completed.len(),
+                        report.needs_input.len(),
+                        report.failed.len()
+                    );
+                    if report.all_completed {
+                        println!("   모든 모험 완료 🍺 — `luida campaign report {id}`로 기록하세요.");
+                    } else if !report.needs_input.is_empty() {
+                        println!("   판단 대기: {:?} — `luida quest resume <id> \"<답변>\"`", report.needs_input);
+                    }
+                }
+                CampaignAction::Report { id } => {
+                    let vault = MemoryVault::default_vault();
+                    let path = report_campaign(&mut conn, &cfg, id, &vault, cli_factory)?;
+                    println!("📜 모험의 서에 기록: {}", path.display());
+                }
+                CampaignAction::List => {
+                    let active = CampaignRepo::new(&conn).list_active()?;
+                    if active.is_empty() {
+                        println!("진행 중인 원정이 없습니다.");
+                    } else {
+                        println!("🗺  진행 중 원정 {}건:", active.len());
+                        for c in active {
+                            println!("   #{} [{}] {}", c.id, c.status, c.title);
+                        }
+                    }
+                }
+            }
+        }
+        Cmd::Quest { action } => {
+            let (mut conn, cfg) = open_ready(&db_path)?;
+            match action {
+                QuestAction::Resume { id, answer } => {
+                    let out = resume_quest(&mut conn, &cfg, id, &answer, cli_factory)?;
+                    println!("⚔  모험 q{id} 재개 → {out:?}");
+                }
+                QuestAction::Triage { id } => {
+                    let d = triage_escalation(&mut conn, &cfg, id, cli_factory)?;
+                    println!(
+                        "🔎 q{id} triage — 사용자 필요: {} / 이유: {}",
+                        if d.ask_user { "예" } else { "아니오(자동 해소 가능)" },
+                        d.reason
+                    );
+                    if let Some(a) = d.auto_answer {
+                        println!("   자동 답변 후보: {a}");
                     }
                 }
             }

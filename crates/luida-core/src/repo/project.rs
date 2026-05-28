@@ -34,6 +34,15 @@ impl<'a> ProjectRepo<'a> {
         Ok(())
     }
 
+    /// 맥락 요약 경로 + 마지막 ingest 시각 기록 (project.ingest 완료 시).
+    pub fn mark_ingested(&self, name: &str, context_path: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE projects SET context_path = ?1, last_ingested_at = ?2 WHERE name = ?3",
+            params![context_path, now_ms(), name],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn get(&self, name: &str) -> Result<Option<Project>> {
         let row = self
             .conn
@@ -145,6 +154,19 @@ mod tests {
         assert!(repo.remove("agora").unwrap());
         assert!(!repo.remove("agora").unwrap());
         assert!(repo.get("agora").unwrap().is_none());
+    }
+
+    #[test]
+    fn mark_ingested_sets_context_and_time() {
+        let conn = setup();
+        let repo = ProjectRepo::new(&conn);
+        repo.add("agora", "/a", "main", None).unwrap();
+        assert!(repo.mark_ingested("agora", "/mem/projects/agora.md").unwrap());
+        let p = repo.get("agora").unwrap().unwrap();
+        assert_eq!(p.context_path.as_deref(), Some("/mem/projects/agora.md"));
+        assert!(p.last_ingested_at.is_some());
+        // 없는 프로젝트는 false
+        assert!(!repo.mark_ingested("ghost", "/x").unwrap());
     }
 
     #[test]

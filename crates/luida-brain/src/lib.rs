@@ -5,8 +5,10 @@
 //!
 //! (reflect/memory-tree 등 지속 학습 데몬은 후속 Phase)
 
+mod ingest;
 mod memory;
 mod report;
 
+pub use ingest::ingest_project;
 pub use memory::{sanitize_filename, MemoryVault};
 pub use report::report_campaign;
