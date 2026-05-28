@@ -84,6 +84,16 @@ impl<'a> RelationshipRepo<'a> {
         )
     }
 
+    /// 전체 관계 (활성·비활성 모두) — 관리 UI/CLI용.
+    pub fn list_all(&self) -> Result<Vec<Relationship>> {
+        self.query_many(
+            "SELECT id, name, from_project, trigger_kind, trigger_config, to_project,
+                    action, brief_template, enabled, source, confidence, created_at
+             FROM relationships ORDER BY id",
+            params![],
+        )
+    }
+
     pub fn list_by_from(&self, from_project: &str) -> Result<Vec<Relationship>> {
         self.query_many(
             "SELECT id, name, from_project, trigger_kind, trigger_config, to_project,
@@ -208,6 +218,17 @@ mod tests {
         repo.set_enabled(id, false).unwrap();
         assert_eq!(repo.list_enabled().unwrap().len(), 1);
         assert_eq!(repo.list_by_from("agora").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_all_includes_disabled() {
+        let conn = setup();
+        let repo = RelationshipRepo::new(&conn);
+        let id = repo.insert(rel("r1", "agora", "admin", "auto_dispatch")).unwrap();
+        repo.insert(rel("r2", "agora", "kontrol", "propose")).unwrap();
+        repo.set_enabled(id, false).unwrap();
+        assert_eq!(repo.list_enabled().unwrap().len(), 1);
+        assert_eq!(repo.list_all().unwrap().len(), 2); // 비활성 포함
     }
 
     #[test]

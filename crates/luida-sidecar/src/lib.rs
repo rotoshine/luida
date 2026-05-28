@@ -8,10 +8,12 @@
 
 mod dispatch;
 mod escalation;
+mod triggers;
 mod worktree;
 
 pub use dispatch::{
     dispatch_quest, resume_quest, DispatchOutcome, ESCALATION_PROTOCOL, MAX_AUTO_RESUME,
 };
 pub use escalation::{notify_user_escalation, triage_escalation, TriageDecision};
+pub use triggers::{fire_quest_completed, TriggerResult};
 pub use worktree::{Worktree, WorktreeProvider, WorktrunkProvider};

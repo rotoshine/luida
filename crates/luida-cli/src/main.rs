@@ -1,12 +1,12 @@
 //! luida — 단일 진입점 CLI (v2 Rust).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use luida_core::agents::{default_agents_path, AgentRuntime, ResolvedAgent};
 use luida_core::{
     machine_id, resolve, resume_bundle, runtime_available, suspend_campaign, AgentsConfig,
-    CampaignRepo, Connection, HandoffBundle, ProjectRepo, QuestRepo, default_db_path, migrate,
-    open_db,
+    CampaignRepo, Connection, HandoffBundle, ProjectRepo, QuestRepo, RelationshipRepo,
+    default_db_path, migrate, open_db,
 };
 use luida_brain::{ingest_project, reflect, report_campaign, MemoryVault};
 use luida_planner::{plan_campaign, run_campaign};
@@ -75,6 +75,11 @@ enum Cmd {
         #[arg(long, default_value_t = 24)]
         since_hours: i64,
     },
+    /// 프로젝트 간 자동화 관계 관리
+    Relationship {
+        #[command(subcommand)]
+        action: RelationshipAction,
+    },
     /// HTTP/SSE 서버 (GUI·클라이언트 브리지)
     Server {
         #[command(subcommand)]
@@ -131,6 +136,16 @@ enum QuestAction {
     Resume { id: i64, answer: String },
     /// escalation을 분류 (자동 해소 가능 여부)
     Triage { id: i64 },
+}
+
+#[derive(Subcommand)]
+enum RelationshipAction {
+    /// 전체 관계 목록 (활성·비활성)
+    List,
+    /// 관계 활성화 (학습 제안 승인)
+    Enable { name: String },
+    /// 관계 비활성화
+    Disable { name: String },
 }
 
 #[derive(Subcommand)]
@@ -334,7 +349,43 @@ fn main() -> Result<()> {
                 println!("   · {p}");
             }
             if report.proposals_inserted > 0 {
-                println!("   제안은 비활성 상태입니다. 검토 후 활성화하세요.");
+                println!("   제안은 비활성 상태입니다. `luida relationship enable <name>`로 활성화하세요.");
+            }
+        }
+        Cmd::Relationship { action } => {
+            let (conn, _cfg) = open_ready(&db_path)?;
+            let repo = RelationshipRepo::new(&conn);
+            match action {
+                RelationshipAction::List => {
+                    let rels = repo.list_all()?;
+                    if rels.is_empty() {
+                        println!("등록된 관계가 없습니다. `luida reflect`로 제안을 받거나 직접 추가하세요.");
+                    } else {
+                        println!("🔗 관계 {}건:", rels.len());
+                        for r in rels {
+                            println!(
+                                "   {:<18} {} --{}/{}-> {}  [{}{}]",
+                                r.name.as_deref().unwrap_or("(이름없음)"),
+                                r.from_project,
+                                r.trigger_kind,
+                                r.action,
+                                r.to_project,
+                                if r.is_enabled() { "활성" } else { "비활성" },
+                                if r.source == "learned-promoted" { ", 학습" } else { "" },
+                            );
+                        }
+                    }
+                }
+                RelationshipAction::Enable { name } => {
+                    let r = repo.find_by_name(&name)?.context("그런 관계가 없습니다")?;
+                    repo.set_enabled(r.id, true)?;
+                    println!("✅ 관계 활성화: {name}");
+                }
+                RelationshipAction::Disable { name } => {
+                    let r = repo.find_by_name(&name)?.context("그런 관계가 없습니다")?;
+                    repo.set_enabled(r.id, false)?;
+                    println!("⏸  관계 비활성화: {name}");
+                }
             }
         }
         Cmd::Agents { action } => {

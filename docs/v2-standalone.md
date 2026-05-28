@@ -469,7 +469,8 @@ campaign의 모든 quest 종료
 > - ✅ **V2-P11** Memory Tree — `memory_chunks`(migration 0004) + 청크화·계층 요약 트리(요약함수 주입). `docs/reviews/v2-p10.md`
 > - ✅ **서버 쓰기 명령** — POST /api/projects (ADR-0002 command API 시작)
 > - ✅ **learning.reflect** — 이벤트 분석 → 프로젝트 관계 제안(비활성, 사람 검토). `luida reflect`. `docs/reviews/v2-p11.md`
-> - ⏳ **후속(환경 제약/대형)** — PTY interactive(P6), Tauri GUI(P9), handoff git transport, LLM-트리거 서버 엔드포인트, brain 데몬화
+> - ✅ **관계 트리거 평가** — quest 완료→auto_dispatch(후속 quest)/propose. run_campaign 폐쇄 루프. `luida relationship list/enable/disable`. `docs/reviews/v2-p12.md` **(원래 동기 자동화 실현)**
+> - ⏳ **후속(환경 제약/대형)** — path_changed/tag_pushed 트리거(git watcher), PTY interactive(P6), Tauri GUI(P9), handoff git transport, LLM-트리거 서버 엔드포인트, brain 데몬화
 > - ✅ (선행) `luida-server` axum HTTP/SSE 브리지(ADR-0002)
 >
 > 전체 게이트: `cargo clippy -D warnings` 0 warning · `cargo test` **122 pass** · 8 crate
@@ -711,3 +712,4 @@ luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
 | 2026-05-28 | 0.15 | **V2-P10 TokenJuice** — compress_context(정리→char-safe 절단), ingest 적용. 전체 139 test |
 | 2026-05-28 | 0.16 | **server POST /api/projects + V2-P11 Memory Tree** — memory_chunks(migration 0004) + 청크화·계층 요약 트리(요약함수 주입). 전체 152 test |
 | 2026-05-28 | 0.17 | **learning.reflect** — 이벤트→관계 제안(검증 후 비활성 저장, learned-promoted) + `luida reflect`. 전체 156 test |
+| 2026-05-28 | 0.18 | **관계 트리거 평가** — quest 완료→auto_dispatch/propose, run_campaign 폐쇄 루프 + `luida relationship` 관리. 원래 동기(교차 프로젝트 자동화) 실현. 전체 163 test |

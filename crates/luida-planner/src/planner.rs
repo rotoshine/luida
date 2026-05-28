@@ -11,8 +11,8 @@ use luida_core::{
     ProjectRepo, QuestRepo,
 };
 use luida_sidecar::{
-    dispatch_quest, notify_user_escalation, resume_quest, triage_escalation, DispatchOutcome,
-    WorktreeProvider, MAX_AUTO_RESUME,
+    dispatch_quest, fire_quest_completed, notify_user_escalation, resume_quest, triage_escalation,
+    DispatchOutcome, WorktreeProvider, MAX_AUTO_RESUME,
 };
 
 use crate::plan::CampaignPlan;
@@ -23,6 +23,8 @@ pub struct CampaignRunReport {
     pub completed: Vec<i64>,
     pub needs_input: Vec<i64>,
     pub failed: Vec<i64>,
+    /// 관계 트리거로 자동 생성·실행된 후속 quest 수.
+    pub triggered: usize,
     /// 원정의 모든 quest가 completed인가 (report 단계 진입 조건).
     pub all_completed: bool,
 }
@@ -165,7 +167,13 @@ where
                 outcome = resume_quest(conn, cfg, q.id, &answer, &runtime_factory)?;
             }
             match outcome {
-                DispatchOutcome::Completed { .. } => report.completed.push(q.id),
+                DispatchOutcome::Completed { .. } => {
+                    report.completed.push(q.id);
+                    // 완료 → 관계 트리거 평가 (auto_dispatch면 같은 campaign에 후속 quest 생성
+                    // → 다음 루프에서 ready로 픽업되어 학습된 자동화가 닫힌다).
+                    let fired = fire_quest_completed(conn, q.id)?;
+                    report.triggered += fired.dispatched.len();
+                }
                 DispatchOutcome::NeedsInput { .. } => {
                     // 자동 해소 실패 → 사용자에게 비방해 알림(멱등).
                     notify_user_escalation(conn, q.id)?;
@@ -356,6 +364,38 @@ mod tests {
         // b는 a 미완으로 pending 유지
         let quests = QuestRepo::new(&conn).list_for_campaign(cid).unwrap();
         assert!(quests.iter().any(|q| q.status == "pending"));
+    }
+
+    #[test]
+    fn run_campaign_fires_relationship_trigger() {
+        use luida_core::{NewRelationship, RelationshipRepo};
+        let mut conn = setup();
+        // agora 단일 quest 계획
+        let single = r#"{"title":"t","quests":[{"key":"a","project":"agora","brief":"스키마 변경"}]}"#;
+        let cid = plan_campaign(&mut conn, &cfg(), "p", result_factory(single)).unwrap();
+        // agora 완료 → admin auto_dispatch 관계
+        RelationshipRepo::new(&conn)
+            .insert(NewRelationship {
+                name: Some("agora-admin"),
+                from_project: "agora",
+                trigger_kind: "quest_completed",
+                trigger_config: "{}",
+                to_project: "admin",
+                action: "auto_dispatch",
+                brief_template: Some("{from_project} 반영"),
+                enabled: true,
+                source: "human",
+                confidence: None,
+            })
+            .unwrap();
+
+        let report = run_campaign(&mut conn, &cfg(), cid, &FakeWorktree, success_factory()).unwrap();
+        // agora 완료 → 트리거가 admin quest 생성 → 같은 루프가 픽업·완료
+        assert_eq!(report.triggered, 1);
+        assert_eq!(report.completed.len(), 2);
+        let quests = QuestRepo::new(&conn).list_for_campaign(cid).unwrap();
+        assert_eq!(quests.len(), 2);
+        assert!(quests.iter().any(|q| q.project == "admin" && q.status == "completed"));
     }
 
     #[test]
