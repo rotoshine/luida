@@ -85,6 +85,15 @@ impl<'a> CampaignRepo<'a> {
         Ok(())
     }
 
+    /// 완료 마감 없이 report 경로만 기록 (실패/부분 완료 원정의 사후 보고).
+    pub fn set_report_path(&self, id: i64, report_path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE campaigns SET report_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![report_path, now_ms(), id],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_completed(&self, id: i64, report_path: Option<&str>) -> Result<()> {
         let now = now_ms();
         self.conn.execute(
@@ -183,6 +192,19 @@ mod tests {
         assert_eq!(c.handoff_state, "suspended");
         assert_eq!(c.owner_machine.as_deref(), Some("home-mac"));
         assert!(repo.set_handoff(id, "bogus", None).is_err());
+    }
+
+    #[test]
+    fn set_report_path_without_completing() {
+        let conn = setup();
+        let repo = CampaignRepo::new(&conn);
+        let id = repo.insert(new_campaign()).unwrap();
+        repo.set_status(id, "running").unwrap();
+        repo.set_report_path(id, "/r/postmortem.md").unwrap();
+        let c = repo.get(id).unwrap().unwrap();
+        assert_eq!(c.report_path.as_deref(), Some("/r/postmortem.md"));
+        assert_eq!(c.status, "running"); // 완료 마감 안 함
+        assert!(c.completed_at.is_none());
     }
 
     #[test]

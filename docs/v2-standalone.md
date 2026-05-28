@@ -461,10 +461,11 @@ campaign의 모든 quest 종료
 >   - worktree는 `wt switch --create`(worktrunk) 사용 — `wt c`는 `--execute=claude`(interactive)라 headless 디스패치엔 worktree-only 경로를 씀
 > - ✅ **V2-P3** `luida-planner` — plan_json 파싱·검증(DAG/사이클) + 위상정렬 + DAG 실행기(순차). `quest_deps` 조인 테이블로 다중 의존성. `docs/reviews/v2-p3.md`
 > - ✅ **V2-P4** escalation triage(자동해소/사용자게이트) + needs_input 알림 + resume(`--resume`) 사이클. `docs/reviews/v2-p4.md`
-> - ⏳ **V2-P5** campaign.report + 모험의 서 — 다음
+> - ✅ **V2-P5** `luida-brain` — campaign.report + Obsidian 호환 vault(모험의 서). `docs/reviews/v2-p5.md`
+> - ⏳ **V2-P8/F** project.ingest + server command API + TUI 패널 — 다음
 > - ✅ (선행) `luida-server` axum HTTP/SSE 브리지(ADR-0002)
 >
-> 전체 게이트: `cargo clippy -D warnings` 0 warning · `cargo test` **110 pass** · 7 crate
+> 전체 게이트: `cargo clippy -D warnings` 0 warning · `cargo test` **118 pass** · 8 crate
 
 ### UI 표면 순서
 v2 UI는 **TUI 먼저 → Tauri 데스크탑 나중**의 순서로 간다:
@@ -697,3 +698,4 @@ luida/                       (git tag v1-typescript로 v1 보존 후 재시작)
 | 2026-05-28 | 0.9 | **V2-P2 구현** — `luida-sidecar` QuestDispatcher(worktree provisioning + resolve→worker 실행→events/status/escalation 배선). worktree는 `wt switch --create`(worktrunk). §8 구현 현황 추가 |
 | 2026-05-28 | 0.10 | **V2-P3 구현** — `luida-planner`(plan_json 파싱·검증·위상정렬 + DAG 실행기). `quest_deps` 조인 테이블(migration 0003)로 다중 의존성. 전체 102 test |
 | 2026-05-28 | 0.11 | **V2-P4 구현** — escalation triage(자동해소 vs 사용자게이트) + `resume_quest`(`--resume`) + run_campaign 자동재개(제한). AgentInvocation.resume. 전체 110 test |
+| 2026-05-28 | 0.12 | **V2-P5 구현** — `luida-brain`(campaign.report + Obsidian vault 모험의 서). MemoryVault(base 주입), chronicle append, 완료마감/사후보고 분리. 전체 118 test |
