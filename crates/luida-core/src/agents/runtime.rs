@@ -129,18 +129,31 @@ pub fn parse_claude_stream_line(line: &str) -> Option<AgentEvent> {
     }
 }
 
+/// 알려진 escalation 카테고리.
+pub const ESCALATION_CATEGORIES: &[&str] =
+    &["system_error", "ambiguous_spec", "design_mismatch", "dangerous_op"];
+
 /// `<<LUIDA_ASK category=...>>...<<END>>` 마커 감지.
+/// **완성된 마커**(`<<END>>` 포함)만 인식 — 잘리거나 분할된 마커는 None (review M5).
 pub fn detect_escalation(text: &str) -> Option<(String, String)> {
     let start = text.find("<<LUIDA_ASK")?;
     let after = &text[start..];
+    // <<END>>가 없으면 불완전 마커 → 무시 (텍스트 끝까지 흡수 방지)
+    let end_rel = after.find("<<END>>")?;
     let cat_marker = "category=";
     let cat_start = after.find(cat_marker)? + cat_marker.len();
+    let body_start = after.find(">>")? + 2;
+    // category= 가 헤더(`>>` 이전)에 있어야 정상 마커
+    if cat_start >= body_start || body_start > end_rel {
+        return None;
+    }
     let cat_rest = &after[cat_start..];
     let cat_end = cat_rest.find([' ', '>'])?;
     let category = cat_rest[..cat_end].trim().to_string();
-    let body_start = after.find(">>")? + 2;
-    let body_end = after.find("<<END>>").unwrap_or(after.len());
-    let message = after[body_start..body_end].trim().to_string();
+    if category.is_empty() {
+        return None;
+    }
+    let message = after[body_start..end_rel].trim().to_string();
     Some((category, message))
 }
 
@@ -250,6 +263,17 @@ mod tests {
         let (c, m) = detect_escalation("<<LUIDA_ASK category=dangerous_op>>rm -rf?<<END>>").unwrap();
         assert_eq!(c, "dangerous_op");
         assert_eq!(m, "rm -rf?");
+    }
+
+    #[test]
+    fn detect_escalation_requires_end_marker() {
+        // <<END>> 없으면 None (텍스트 끝까지 흡수 방지)
+        assert!(detect_escalation("<<LUIDA_ASK category=design_mismatch>>질문 계속...").is_none());
+    }
+
+    #[test]
+    fn detect_escalation_rejects_empty_category() {
+        assert!(detect_escalation("<<LUIDA_ASK category=>>x<<END>>").is_none());
     }
 
     #[test]

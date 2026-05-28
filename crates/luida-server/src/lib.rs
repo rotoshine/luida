@@ -6,12 +6,12 @@
 //! rusqlite Connection은 !Sync라 Arc<Mutex<Connection>>로 공유.
 
 use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
 use axum::extract::State;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -20,6 +20,21 @@ use serde_json::{json, Value};
 
 /// 공유 상태 — DB connection (Mutex로 Sync 확보).
 pub type AppState = Arc<Mutex<Connection>>;
+
+/// Mutex poisoning을 복구해 잠금 (한 핸들러의 패닉이 서버 전체를 죽이지 않게). review C3.
+fn lock_recover(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 동기 SQLite 쿼리를 blocking 풀에서 실행 (tokio 워커 블로킹 방지). review C2.
+async fn snapshot_blocking(state: AppState) -> Value {
+    tokio::task::spawn_blocking(move || {
+        let conn = lock_recover(&state);
+        snapshot_json(&conn).unwrap_or_else(|e| json!({ "error": e.to_string() }))
+    })
+    .await
+    .unwrap_or_else(|e| json!({ "error": format!("join error: {e}") }))
+}
 
 /// 라우터 구성. 테스트는 이걸 직접 oneshot 호출.
 pub fn build_router(state: AppState) -> Router {
@@ -50,37 +65,24 @@ fn snapshot_json(conn: &Connection) -> Result<Value> {
 }
 
 async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
-    let result = {
-        let conn = state.lock().expect("db mutex poisoned");
-        snapshot_json(&conn)
-    };
-    match result {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": e.to_string() })),
-        )
-            .into_response(),
-    }
+    Json(snapshot_blocking(state).await)
 }
 
 /// SSE — 1초 주기 스냅샷 스트림.
+/// 각 tick의 DB 접근은 spawn_blocking으로 async 워커를 막지 않음.
+/// 클라이언트 연결 종료 시 yield 실패로 stream future가 drop되어 루프 정리됨.
 async fn stream(
     State(state): State<AppState>,
 ) -> Sse<impl futures_core::Stream<Item = Result<Event, Infallible>>> {
-    // tokio interval을 stream으로
     let s = async_stream::stream! {
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
         loop {
             ticker.tick().await;
-            let payload = {
-                let conn = state.lock().expect("db mutex poisoned");
-                snapshot_json(&conn).unwrap_or_else(|e| json!({ "error": e.to_string() }))
-            };
+            let payload = snapshot_blocking(state.clone()).await;
             yield Ok(Event::default().data(payload.to_string()));
         }
     };
-    Sse::new(s)
+    Sse::new(s).keep_alive(KeepAlive::default())
 }
 
 /// 서버 실행 (127.0.0.1:port). luida server start에서 호출.

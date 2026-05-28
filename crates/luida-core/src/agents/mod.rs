@@ -14,4 +14,5 @@ pub use resolver::{resolve, runtime_available, ResolvedAgent};
 pub use runtime::{
     detect_escalation, finalize_outcome, fold_outcome, parse_claude_stream_line,
     AgentEvent, AgentInvocation, AgentOutcome, AgentRuntime, ScriptedRuntime,
+    ESCALATION_CATEGORIES,
 };
