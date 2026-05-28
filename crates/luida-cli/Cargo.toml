@@ -12,5 +12,7 @@ path = "src/main.rs"
 [dependencies]
 luida-core = { path = "../luida-core" }
 luida-tui = { path = "../luida-tui" }
+luida-server = { path = "../luida-server" }
 clap.workspace = true
 anyhow.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

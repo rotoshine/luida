@@ -35,8 +35,22 @@ enum Cmd {
         #[command(subcommand)]
         action: AgentsAction,
     },
+    /// HTTP/SSE 서버 (GUI·클라이언트 브리지)
+    Server {
+        #[command(subcommand)]
+        action: ServerAction,
+    },
     /// TUI 대시보드 (모험지 등록부)
     Ui,
+}
+
+#[derive(Subcommand)]
+enum ServerAction {
+    /// 로컬 HTTP/SSE 서버 시작
+    Start {
+        #[arg(long, default_value_t = 4321)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand)]
@@ -187,6 +201,14 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Server { action } => match action {
+            ServerAction::Start { port } => {
+                let mut conn = open_db(&db_path)?;
+                migrate(&mut conn)?;
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(async move { luida_server::serve(port, conn).await })?;
+            }
+        },
         Cmd::Ui => {
             luida_tui::run(&db_path)?;
         }

@@ -8,6 +8,7 @@ pub mod models;
 pub mod repo;
 
 pub use db::{default_db_path, migrate, now_ms, open_db, open_memory};
+pub use rusqlite::Connection;
 pub use models::{
     Campaign, Event, Inmail, Project, Quest, Relationship, EpochMs,
 };
