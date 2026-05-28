@@ -16,3 +16,7 @@ tavern.db
 tavern.db-*
 *.sqlite
 *.sqlite-*
+
+# Rust
+/target
+Cargo.lock

@@ -1,0 +1,13 @@
+[package]
+name = "luida-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+# NOTE: serde_json·thiserror는 후속 Phase(agents.json 파싱·CoreError enum) 도입 시 추가.
+# 라이브러리 crate라 향후 thiserror로 도메인 에러(NotFound/Busy/Migration) 타입화 예정 (review m5).

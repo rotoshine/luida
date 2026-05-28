@@ -1,0 +1,16 @@
+[package]
+name = "luida-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "luida"
+path = "src/main.rs"
+
+[dependencies]
+luida-core = { path = "../luida-core" }
+luida-tui = { path = "../luida-tui" }
+clap.workspace = true
+anyhow.workspace = true
