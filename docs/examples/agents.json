@@ -19,13 +19,25 @@
         "simple": "gpt-5.1-codex-mini"
       }
     },
+
+    "_comment_backlog": "아래는 API 기반 런타임 — v2 범위 밖(backlog). enabled:false. 로컬 CLI(claude/codex)만 1급 지원.",
     "deepseek": {
       "kind": "openai-compatible",
+      "enabled": false,
       "baseUrl": "https://api.deepseek.com",
       "apiKeyEnv": "DEEPSEEK_API_KEY",
       "models": {
         "complex": "deepseek-reasoner",
         "simple": "deepseek-chat"
+      }
+    },
+    "ollama": {
+      "kind": "openai-compatible",
+      "enabled": false,
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "models": {
+        "complex": "qwen2.5-coder:32b",
+        "simple": "qwen2.5-coder:7b"
       }
     }
   },
@@ -40,7 +52,8 @@
     "campaign.report":   { "runtime": "claude", "tier": "simple" },
     "project.ingest":    { "runtime": "claude", "tier": "simple" },
     "pr.describe":       { "runtime": "claude", "tier": "simple" },
-    "inmail.summarize":  { "runtime": "claude", "tier": "simple" }
+    "inmail.summarize":  { "runtime": "claude", "tier": "simple" },
+    "handoff.bundle":    { "runtime": "claude", "tier": "simple" }
   },
 
   "projectOverrides": {

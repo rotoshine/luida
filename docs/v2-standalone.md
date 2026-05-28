@@ -117,14 +117,18 @@ v2의 모든 LLM 호출 지점을 **행위(action)**로 분류한다. 각 행위
       "command": "codex",
       "models": { "complex": "gpt-5.1-codex-max", "simple": "gpt-5.1-codex-mini" }
     },
+    // ── backlog (v2 범위 밖, 인터페이스 자리만) ──────────────
+    // API 기반 런타임. 실제 필요 생기면 승격. 기본 비활성.
     "deepseek": {
       "kind": "openai-compatible",
+      "enabled": false,
       "baseUrl": "https://api.deepseek.com",
       "apiKeyEnv": "DEEPSEEK_API_KEY",
       "models": { "complex": "deepseek-reasoner", "simple": "deepseek-chat" }
     },
     "ollama": {
       "kind": "openai-compatible",
+      "enabled": false,
       "baseUrl": "http://127.0.0.1:11434/v1",
       "models": { "complex": "qwen2.5-coder:32b", "simple": "qwen2.5-coder:7b" }
     }
@@ -205,13 +209,23 @@ export interface AgentRuntime {
 ```
 
 ### 5.2 구현 (신규 패키지 `@luida/runtimes`)
-| kind | 호출 방식 |
-|---|---|
-| `claude-cli` | `claude -p --model <model> --output-format stream-json` (기존 ClaudeWorkerRunner 일반화) |
-| `codex-cli` | `codex exec --model <model> ...` (stream 파싱) |
-| `openai-compatible` | `POST {baseUrl}/chat/completions` (deepseek 등). stream=SSE 파싱 |
 
-→ v1의 `WorkerRunner`는 이 인터페이스의 `claude-cli` 케이스로 흡수.
+**전제: claude·codex는 해당 PC에 설치된 로컬 CLI를 그대로 사용한다. API 기반 호출(openai-compatible)은 backlog.**
+
+| kind | 상태 | 호출 방식 |
+|---|---|---|
+| `claude-cli` | **v2 1급 지원** | `claude -p --model <model> --output-format stream-json` (기존 ClaudeWorkerRunner 일반화). 로컬 `claude` CLI 전제 |
+| `codex-cli` | **v2 1급 지원** | `codex exec --model <model> ...` (stream 파싱). 로컬 `codex` CLI 전제 |
+| `openai-compatible` | **backlog** | `POST {baseUrl}/chat/completions` (deepseek/ollama). API 키·HTTP 클라이언트 필요. v2 범위 밖, 인터페이스 자리만 마련 |
+
+이유:
+- 로컬 CLI는 **사용자의 기존 인증·구독을 그대로 사용** (claude Pro/Max, codex 로그인). 별도 API 키 관리 불필요.
+- CLI는 **stream-json/도구 호출/세션 재개**가 이미 구현돼 있어 어댑터가 얇음.
+- API 경로는 인증·rate limit·tool-use 규약·SSE 파싱이 런타임마다 달라 비용이 큼 → 실제 필요가 생기면 backlog에서 승격.
+
+→ v1의 `WorkerRunner`는 `claude-cli` 케이스로 흡수. `codex-cli`가 v2에서 두 번째로 추가되는 1급 런타임.
+
+**런타임 가용성 체크**: AgentResolver는 호출 전 해당 CLI가 PATH에 있는지 확인 (`which claude` / `which codex`). 없으면 명확한 에러 + agents.json에서 다른 런타임으로 fallback 안내.
 
 ### 5.3 escalation 이벤트
 worker가 판단이 필요할 때 `{ kind: 'escalation', category, message }` 이벤트를 emit:
@@ -392,7 +406,7 @@ v2 UI는 **TUI 먼저 → Tauri 데스크탑 나중**의 순서로 간다:
 
 ## 9. 미해결 질문 (구현 전 결정)
 
-1. **codex/deepseek 실제 호출 규약**: codex CLI의 stream 포맷, deepseek tool-use 지원 범위 확인 필요. 초기엔 claude-cli만 완전 지원, 나머지는 text-only로 시작?
+1. ~~codex/deepseek 실제 호출 규약~~ **[결정됨]** claude·codex는 **로컬 CLI 전제**로 v2 1급 지원. deepseek/ollama(openai-compatible)는 **backlog** (`enabled:false`). codex CLI의 stream 포맷·tool-use 규약 확인은 codex-cli 어댑터 구현 시점(V2-P2)에 진행.
 2. **escalation 마커 규약**: claude worker가 "물어봐야 함"을 어떻게 신호할지. 전용 도구 vs 출력 마커. Claude Code의 ask 패턴과 정합성.
 3. **DAG 동시 실행 한도**: 의존성 없는 quest를 몇 개까지 병렬로? (자원·비용·머지 충돌)
 4. **계획 미리보기 UX**: campaign.plan 결과를 사용자가 어떻게 검토·수정하는지 (전체 수락 vs quest별 편집)
@@ -546,3 +560,4 @@ ALTER TABLE campaigns ADD COLUMN handoff_state TEXT DEFAULT 'active';
 | 2026-05-28 | 0.2 | UI 표면 순서(TUI→Tauri) + V2-P9 Tauri 패키징 §12 추가 |
 | 2026-05-28 | 0.3 | OpenHuman 차용 — Memory Tree·Obsidian vault(§6.1) + TokenJuice(§5.4) + ollama runtime + V2-P10/P11 + §13 |
 | 2026-05-28 | 0.4 | 모험 중단·재개(Suspend/Resume) §14 + V2-P12 — git handoff 브랜치, single owner 잠금, 미커밋 통째 이전 |
+| 2026-05-28 | 0.5 | 런타임 정책 확정 — claude·codex 로컬 CLI 전제(1급), openai-compatible(deepseek/ollama)은 backlog(`enabled:false`) + CLI 가용성 체크 |
