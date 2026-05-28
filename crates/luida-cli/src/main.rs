@@ -2,7 +2,10 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use luida_core::{default_db_path, migrate, open_db, ProjectRepo};
+use luida_core::agents::default_agents_path;
+use luida_core::{
+    resolve, runtime_available, AgentsConfig, default_db_path, migrate, open_db, ProjectRepo,
+};
 
 #[derive(Parser)]
 #[command(
@@ -27,8 +30,27 @@ enum Cmd {
         #[command(subcommand)]
         action: ProjectAction,
     },
+    /// 에이전트 런타임/모델 설정
+    Agents {
+        #[command(subcommand)]
+        action: AgentsAction,
+    },
     /// TUI 대시보드 (모험지 등록부)
     Ui,
+}
+
+#[derive(Subcommand)]
+enum AgentsAction {
+    /// 기본 agents.json 생성 (이미 있으면 유지)
+    Init,
+    /// 행위(action)를 런타임/모델/모드로 해소해서 보여줌
+    Resolve {
+        action: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// 현재 설정 요약
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -115,6 +137,53 @@ fn main() -> Result<()> {
                     } else {
                         println!("그런 모험지가 없습니다: {name}");
                     }
+                }
+            }
+        }
+        Cmd::Agents { action } => {
+            let path = default_agents_path();
+            match action {
+                AgentsAction::Init => {
+                    if path.exists() {
+                        println!("이미 존재: {}", path.display());
+                    } else {
+                        AgentsConfig::default_config().save(&path)?;
+                        println!("🤖 기본 agents.json 생성: {}", path.display());
+                    }
+                }
+                AgentsAction::Resolve { action, project } => {
+                    let cfg = AgentsConfig::load_or_default(&path)?;
+                    let r = resolve(&cfg, &action, project.as_deref())?;
+                    println!("🎯 {} → ", r.action);
+                    println!("   runtime : {} ({})", r.runtime, r.kind);
+                    println!("   model   : {}", r.model);
+                    println!("   tier    : {}", r.tier);
+                    println!("   mode    : {}", r.mode);
+                    if let Some(p) = &project {
+                        println!("   project : {p}");
+                    }
+                    let avail = runtime_available(&cfg, &r.runtime);
+                    println!("   사용가능 : {}", if avail { "예" } else { "아니오 (CLI 미설치?)" });
+                }
+                AgentsAction::Show => {
+                    let cfg = AgentsConfig::load_or_default(&path)?;
+                    println!("🤖 agents.json ({})", path.display());
+                    println!("   기본: {} / {}", cfg.defaults.runtime, cfg.defaults.tier);
+                    println!("   런타임:");
+                    let mut names: Vec<_> = cfg.runtimes.keys().collect();
+                    names.sort();
+                    for n in names {
+                        let rt = &cfg.runtimes[n];
+                        println!(
+                            "     {:<10} {:<18} complex={} simple={} {}",
+                            n,
+                            rt.kind,
+                            rt.models.complex,
+                            rt.models.simple,
+                            if rt.enabled { "" } else { "[비활성]" }
+                        );
+                    }
+                    println!("   행위 매핑: {}건", cfg.actions.len());
                 }
             }
         }

@@ -1,0 +1,12 @@
+//! Agent 설정(agents.json) + 행위→런타임/모델 해소(Resolver).
+//!
+//! 행위(action)별로 어떤 런타임(claude/codex/...)·모델·실행모드를 쓸지 결정한다.
+//! 우선순위: projectOverrides > actions > defaults. tier 미지정 시 런타임의 tier별 기본 모델.
+
+mod config;
+mod resolver;
+
+pub use config::{
+    default_agents_path, ActionConfig, AgentsConfig, Defaults, RuntimeDef, RuntimeModels,
+};
+pub use resolver::{resolve, runtime_available, ResolvedAgent};

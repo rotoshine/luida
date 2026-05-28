@@ -45,10 +45,13 @@ pub fn open_memory() -> Result<Connection> {
     Ok(conn)
 }
 
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_init.sql",
-    include_str!("../migrations/0001_init.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init.sql", include_str!("../migrations/0001_init.sql")),
+    (
+        "0002_v2_core.sql",
+        include_str!("../migrations/0002_v2_core.sql"),
+    ),
+];
 
 /// 미적용 마이그레이션을 순서대로 적용. 적용된 이름 목록을 반환 (idempotent).
 ///
@@ -94,19 +97,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn migrate_creates_projects_table() {
+    fn migrate_creates_all_tables() {
         let mut conn = open_memory().unwrap();
         let applied = migrate(&mut conn).unwrap();
-        assert_eq!(applied, vec!["0001_init.sql".to_string()]);
+        assert_eq!(
+            applied,
+            vec!["0001_init.sql".to_string(), "0002_v2_core.sql".to_string()]
+        );
 
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
+        for table in [
+            "projects",
+            "campaigns",
+            "quests",
+            "inmail",
+            "events",
+            "relationships",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table {table} missing");
+        }
     }
 
     #[test]
@@ -114,7 +129,7 @@ mod tests {
         let mut conn = open_memory().unwrap();
         let first = migrate(&mut conn).unwrap();
         let second = migrate(&mut conn).unwrap();
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 0);
     }
 }

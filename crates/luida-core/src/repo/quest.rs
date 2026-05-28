@@ -1,0 +1,359 @@
+use anyhow::Result;
+use rusqlite::{params, Connection, OptionalExtension, Row};
+
+use crate::db::now_ms;
+use crate::models::Quest;
+
+/// 새 quest 생성 입력.
+pub struct NewQuest<'a> {
+    pub campaign_id: Option<i64>,
+    pub project: &'a str,
+    pub brief: &'a str,
+    pub branch: Option<&'a str>,
+    pub status: &'a str,
+    pub depends_on_quest_id: Option<i64>,
+    pub source_inmail_id: Option<i64>,
+}
+
+/// 멱등 insert 결과.
+pub struct QuestInsert {
+    pub id: i64,
+    /// false면 source_inmail_id 충돌로 기존 quest 반환.
+    pub created: bool,
+}
+
+pub struct QuestRepo<'a> {
+    conn: &'a Connection,
+}
+
+impl<'a> QuestRepo<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self { conn }
+    }
+
+    pub fn insert(&self, q: NewQuest) -> Result<i64> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO quests
+               (campaign_id, project, brief, branch, status,
+                depends_on_quest_id, source_inmail_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                q.campaign_id,
+                q.project,
+                q.brief,
+                q.branch,
+                q.status,
+                q.depends_on_quest_id,
+                q.source_inmail_id,
+                now
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// source_inmail_id 기반 멱등 insert. 이미 있으면 기존 반환.
+    /// UNIQUE race(다른 프로세스가 그 사이 insert)도 재조회로 복구.
+    pub fn insert_idempotent(&self, q: NewQuest) -> Result<QuestInsert> {
+        let src = q.source_inmail_id;
+        if let Some(s) = src {
+            if let Some(existing) = self.find_by_source(s)? {
+                return Ok(QuestInsert {
+                    id: existing.id,
+                    created: false,
+                });
+            }
+        }
+        match self.insert(q) {
+            Ok(id) => Ok(QuestInsert { id, created: true }),
+            Err(e) => {
+                if let Some(s) = src {
+                    if let Some(existing) = self.find_by_source(s)? {
+                        return Ok(QuestInsert {
+                            id: existing.id,
+                            created: false,
+                        });
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    pub fn get(&self, id: i64) -> Result<Option<Quest>> {
+        Ok(self
+            .conn
+            .query_row(SELECT_ONE, params![id], Self::map_row)
+            .optional()?)
+    }
+
+    pub fn find_by_source(&self, source_inmail_id: i64) -> Result<Option<Quest>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, campaign_id, project, brief, branch, worktree_path, status,
+                        progress, pr_url, log_path, depends_on_quest_id, source_inmail_id,
+                        created_at, updated_at, completed_at
+                 FROM quests WHERE source_inmail_id = ?1",
+                params![source_inmail_id],
+                Self::map_row,
+            )
+            .optional()?)
+    }
+
+    pub fn list_active(&self) -> Result<Vec<Quest>> {
+        self.query_many(
+            "SELECT id, campaign_id, project, brief, branch, worktree_path, status,
+                    progress, pr_url, log_path, depends_on_quest_id, source_inmail_id,
+                    created_at, updated_at, completed_at
+             FROM quests
+             WHERE status NOT IN ('completed', 'failed', 'aborted')
+             ORDER BY updated_at DESC",
+            params![],
+        )
+    }
+
+    pub fn list_for_campaign(&self, campaign_id: i64) -> Result<Vec<Quest>> {
+        self.query_many(
+            "SELECT id, campaign_id, project, brief, branch, worktree_path, status,
+                    progress, pr_url, log_path, depends_on_quest_id, source_inmail_id,
+                    created_at, updated_at, completed_at
+             FROM quests WHERE campaign_id = ?1 ORDER BY id",
+            params![campaign_id],
+        )
+    }
+
+    pub fn set_status(&self, id: i64, status: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE quests SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, now_ms(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_progress(&self, id: i64, progress: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE quests SET progress = ?1, updated_at = ?2 WHERE id = ?3",
+            params![progress, now_ms(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_worktree(&self, id: i64, branch: &str, path: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE quests SET branch = ?1, worktree_path = ?2, updated_at = ?3 WHERE id = ?4",
+            params![branch, path, now_ms(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_completed(&self, id: i64, pr_url: Option<&str>) -> Result<()> {
+        let now = now_ms();
+        self.conn.execute(
+            "UPDATE quests SET status = 'completed', pr_url = ?1, updated_at = ?2, completed_at = ?2 WHERE id = ?3",
+            params![pr_url, now, id],
+        )?;
+        Ok(())
+    }
+
+    /// 의존 quest가 모두 완료되어 실행 가능한 quest (pending + dep 없음/완료).
+    pub fn ready_in_campaign(&self, campaign_id: i64) -> Result<Vec<Quest>> {
+        let all = self.list_for_campaign(campaign_id)?;
+        let completed: std::collections::HashSet<i64> = all
+            .iter()
+            .filter(|q| q.status == "completed")
+            .map(|q| q.id)
+            .collect();
+        Ok(all
+            .into_iter()
+            .filter(|q| {
+                q.status == "pending"
+                    && q
+                        .depends_on_quest_id
+                        .is_none_or(|dep| completed.contains(&dep))
+            })
+            .collect())
+    }
+
+    fn query_many(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Quest>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(p, Self::map_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    fn map_row(r: &Row) -> rusqlite::Result<Quest> {
+        Ok(Quest {
+            id: r.get(0)?,
+            campaign_id: r.get(1)?,
+            project: r.get(2)?,
+            brief: r.get(3)?,
+            branch: r.get(4)?,
+            worktree_path: r.get(5)?,
+            status: r.get(6)?,
+            progress: r.get(7)?,
+            pr_url: r.get(8)?,
+            log_path: r.get(9)?,
+            depends_on_quest_id: r.get(10)?,
+            source_inmail_id: r.get(11)?,
+            created_at: r.get(12)?,
+            updated_at: r.get(13)?,
+            completed_at: r.get(14)?,
+        })
+    }
+}
+
+const SELECT_ONE: &str =
+    "SELECT id, campaign_id, project, brief, branch, worktree_path, status,
+            progress, pr_url, log_path, depends_on_quest_id, source_inmail_id,
+            created_at, updated_at, completed_at
+     FROM quests WHERE id = ?1";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{migrate, open_memory};
+    use crate::repo::ProjectRepo;
+
+    fn setup() -> Connection {
+        let mut conn = open_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        let p = ProjectRepo::new(&conn);
+        p.add("agora", "/a", "main", None).unwrap();
+        p.add("admin", "/b", "main", None).unwrap();
+        conn
+    }
+
+    fn nq<'a>(project: &'a str, brief: &'a str) -> NewQuest<'a> {
+        NewQuest {
+            campaign_id: None,
+            project,
+            brief,
+            branch: None,
+            status: "pending",
+            depends_on_quest_id: None,
+            source_inmail_id: None,
+        }
+    }
+
+    #[test]
+    fn insert_and_get() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let id = repo.insert(nq("agora", "스키마 작업")).unwrap();
+        let q = repo.get(id).unwrap().unwrap();
+        assert_eq!(q.project, "agora");
+        assert_eq!(q.brief, "스키마 작업");
+        assert_eq!(q.status, "pending");
+    }
+
+    #[test]
+    fn fk_rejects_unknown_project() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        assert!(repo.insert(nq("ghost", "x")).is_err());
+    }
+
+    #[test]
+    fn invalid_status_rejected() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let mut q = nq("agora", "x");
+        q.status = "bogus";
+        assert!(repo.insert(q).is_err());
+    }
+
+    #[test]
+    fn idempotent_by_source_inmail() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let mut q1 = nq("agora", "first");
+        q1.source_inmail_id = Some(42);
+        let r1 = repo.insert_idempotent(q1).unwrap();
+        assert!(r1.created);
+
+        let mut q2 = nq("agora", "dup");
+        q2.source_inmail_id = Some(42);
+        let r2 = repo.insert_idempotent(q2).unwrap();
+        assert!(!r2.created);
+        assert_eq!(r1.id, r2.id);
+    }
+
+    #[test]
+    fn status_and_worktree_updates() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let id = repo.insert(nq("agora", "x")).unwrap();
+        repo.set_status(id, "running").unwrap();
+        repo.set_worktree(id, "feat/x", "/wt/x").unwrap();
+        repo.set_progress(id, Some("50%")).unwrap();
+        let q = repo.get(id).unwrap().unwrap();
+        assert_eq!(q.status, "running");
+        assert_eq!(q.branch.as_deref(), Some("feat/x"));
+        assert_eq!(q.worktree_path.as_deref(), Some("/wt/x"));
+        assert_eq!(q.progress.as_deref(), Some("50%"));
+    }
+
+    #[test]
+    fn mark_completed() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let id = repo.insert(nq("agora", "x")).unwrap();
+        repo.mark_completed(id, Some("https://x/pr/1")).unwrap();
+        let q = repo.get(id).unwrap().unwrap();
+        assert_eq!(q.status, "completed");
+        assert_eq!(q.pr_url.as_deref(), Some("https://x/pr/1"));
+        assert!(q.completed_at.is_some());
+    }
+
+    #[test]
+    fn list_active_excludes_terminal() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let a = repo.insert(nq("agora", "a")).unwrap();
+        let b = repo.insert(nq("admin", "b")).unwrap();
+        repo.mark_completed(b, None).unwrap();
+        let active = repo.list_active().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, a);
+    }
+
+    #[test]
+    fn ready_in_campaign_respects_dag() {
+        let mut conn = open_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        ProjectRepo::new(&conn).add("agora", "/a", "main", None).unwrap();
+        ProjectRepo::new(&conn).add("admin", "/b", "main", None).unwrap();
+        let cid = crate::repo::CampaignRepo::new(&conn)
+            .insert(crate::repo::NewCampaign {
+                title: "t",
+                prompt: "p",
+                plan_json: "{}",
+                status: "running",
+            })
+            .unwrap();
+        let repo = QuestRepo::new(&conn);
+        // q1: 의존 없음 → ready
+        let mut q1 = nq("agora", "q1");
+        q1.campaign_id = Some(cid);
+        let q1id = repo.insert(q1).unwrap();
+        // q2: q1에 의존 → q1 완료 전엔 not ready
+        let mut q2 = nq("admin", "q2");
+        q2.campaign_id = Some(cid);
+        q2.depends_on_quest_id = Some(q1id);
+        repo.insert(q2).unwrap();
+
+        let ready = repo.ready_in_campaign(cid).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, q1id);
+
+        // q1 완료 → q2도 ready
+        repo.mark_completed(q1id, None).unwrap();
+        let ready2 = repo.ready_in_campaign(cid).unwrap();
+        assert_eq!(ready2.len(), 1);
+        assert_eq!(ready2[0].project, "admin");
+    }
+}
