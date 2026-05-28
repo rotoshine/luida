@@ -1,0 +1,13 @@
+[package]
+name = "luida-planner"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+luida-core = { path = "../luida-core" }
+luida-sidecar = { path = "../luida-sidecar" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -156,23 +156,58 @@ impl<'a> QuestRepo<'a> {
         Ok(())
     }
 
-    /// 의존 quest가 모두 완료되어 실행 가능한 quest (pending + dep 없음/완료).
+    /// quest에 의존성 추가 (다중 의존 DAG). 멱등(INSERT OR IGNORE).
+    pub fn add_dependency(&self, quest_id: i64, depends_on_quest_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO quest_deps (quest_id, depends_on_quest_id) VALUES (?1, ?2)",
+            params![quest_id, depends_on_quest_id],
+        )?;
+        Ok(())
+    }
+
+    /// quest의 모든 의존성 quest id (quest_deps 기준).
+    pub fn dependencies(&self, quest_id: i64) -> Result<Vec<i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT depends_on_quest_id FROM quest_deps WHERE quest_id = ?1")?;
+        let rows = stmt.query_map(params![quest_id], |r| r.get::<_, i64>(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// 의존 quest가 모두 완료되어 실행 가능한 quest (pending + 모든 의존 완료).
+    ///
+    /// 의존성은 두 곳을 모두 본다: 레거시 단일 `depends_on_quest_id`(back-compat) +
+    /// `quest_deps` 조인 테이블(다중 의존). 둘 다 완료여야 ready.
     pub fn ready_in_campaign(&self, campaign_id: i64) -> Result<Vec<Quest>> {
+        use std::collections::HashSet;
         let all = self.list_for_campaign(campaign_id)?;
-        let completed: std::collections::HashSet<i64> = all
+        let completed: HashSet<i64> = all
             .iter()
             .filter(|q| q.status == "completed")
             .map(|q| q.id)
             .collect();
-        Ok(all
-            .into_iter()
-            .filter(|q| {
-                q.status == "pending"
-                    && q
-                        .depends_on_quest_id
-                        .is_none_or(|dep| completed.contains(&dep))
-            })
-            .collect())
+
+        let mut ready = Vec::new();
+        for q in all.into_iter().filter(|q| q.status == "pending") {
+            let legacy_ok = q
+                .depends_on_quest_id
+                .is_none_or(|dep| completed.contains(&dep));
+            if !legacy_ok {
+                continue;
+            }
+            let multi_ok = self
+                .dependencies(q.id)?
+                .iter()
+                .all(|dep| completed.contains(dep));
+            if multi_ok {
+                ready.push(q);
+            }
+        }
+        Ok(ready)
     }
 
     fn query_many(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Quest>> {
@@ -355,5 +390,67 @@ mod tests {
         let ready2 = repo.ready_in_campaign(cid).unwrap();
         assert_eq!(ready2.len(), 1);
         assert_eq!(ready2[0].project, "admin");
+    }
+
+    #[test]
+    fn ready_respects_multi_dependency_quest_deps() {
+        // 다이아몬드: a → b,c → d. d는 quest_deps로 b·c 둘 다 의존.
+        let mut conn = open_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        ProjectRepo::new(&conn).add("p", "/p", "main", None).unwrap();
+        let cid = crate::repo::CampaignRepo::new(&conn)
+            .insert(crate::repo::NewCampaign {
+                title: "t",
+                prompt: "p",
+                plan_json: "{}",
+                status: "running",
+            })
+            .unwrap();
+        let repo = QuestRepo::new(&conn);
+        let mk = |brief: &str| {
+            let mut q = nq("p", "x");
+            q.campaign_id = Some(cid);
+            q.brief = brief;
+            repo.insert(q).unwrap()
+        };
+        let a = mk("a");
+        let b = mk("b");
+        let c = mk("c");
+        let d = mk("d");
+        repo.add_dependency(b, a).unwrap();
+        repo.add_dependency(c, a).unwrap();
+        repo.add_dependency(d, b).unwrap();
+        repo.add_dependency(d, c).unwrap();
+
+        // 처음엔 a만 ready
+        let r = repo.ready_in_campaign(cid).unwrap();
+        assert_eq!(r.iter().map(|q| q.id).collect::<Vec<_>>(), vec![a]);
+
+        // a 완료 → b,c ready (d는 아직)
+        repo.mark_completed(a, None).unwrap();
+        let r = repo.ready_in_campaign(cid).unwrap();
+        let ids: std::collections::HashSet<i64> = r.iter().map(|q| q.id).collect();
+        assert_eq!(ids, [b, c].into_iter().collect());
+
+        // b만 완료 → d는 아직 (c 미완)
+        repo.mark_completed(b, None).unwrap();
+        let r = repo.ready_in_campaign(cid).unwrap();
+        assert_eq!(r.iter().map(|q| q.id).collect::<Vec<_>>(), vec![c]);
+
+        // c도 완료 → d ready
+        repo.mark_completed(c, None).unwrap();
+        let r = repo.ready_in_campaign(cid).unwrap();
+        assert_eq!(r.iter().map(|q| q.id).collect::<Vec<_>>(), vec![d]);
+    }
+
+    #[test]
+    fn add_dependency_is_idempotent() {
+        let conn = setup();
+        let repo = QuestRepo::new(&conn);
+        let a = repo.insert(nq("agora", "a")).unwrap();
+        let b = repo.insert(nq("admin", "b")).unwrap();
+        repo.add_dependency(b, a).unwrap();
+        repo.add_dependency(b, a).unwrap(); // 중복 무시
+        assert_eq!(repo.dependencies(b).unwrap(), vec![a]);
     }
 }

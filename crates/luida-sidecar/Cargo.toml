@@ -1,0 +1,12 @@
+[package]
+name = "luida-sidecar"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+luida-core = { path = "../luida-core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
