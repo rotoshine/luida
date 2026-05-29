@@ -2,6 +2,11 @@
 
 Luida 웹/데스크탑 대시보드.
 
+> ⚠️ **v2 현황** — 프론트엔드(Vite/React)는 유효하지만 **백엔드는 아직 v1**(`src-server/`, Bun.serve, `@luida/core` TS 의존)입니다.
+> v2에서 API는 `luida server start`(Rust/Axum: `/api/{health,snapshot,stream}` · `POST /api/projects`)로 제공되고,
+> 정적 프론트 서빙 통합과 Tauri 패키징은 **V2-P9 / ADR-0002 에서 진행 중**입니다.
+> 아래 `luida web` 은 v1 명령이라 현재 v2 CLI 에는 없습니다.
+
 ```
 packages/web/
 ├── index.html              # Vite entry (production)
@@ -31,10 +36,11 @@ packages/web/
 
 ## 개발
 
-### 백엔드 (별도 터미널)
+### 백엔드 API (v2 · Rust)
 ```bash
-luida web --port 4321
+luida server start --port 4321   # Rust/Axum, API only (정적 서빙 통합은 진행 중)
 ```
+v1 Bun 백엔드(정적 + API 통합)는 `src-server/` 에 남아있음 — Rust 포팅 대기.
 
 ### 프런트엔드 dev (HMR)
 ```bash
@@ -47,8 +53,8 @@ bun run dev          # Vite dev 4322, /api/* proxy → 4321
 ### 프런트엔드 빌드
 ```bash
 cd packages/web
-bun run build        # dist/ 생성 (Bun.serve가 자동 우선 서빙)
-luida web            # dist/ 로 서빙 (production)
+bun run build        # dist/ 생성
+bun run preview      # vite preview 로 로컬 확인 (v2 정적 서빙 통합 전까지)
 ```
 
 ### Tauri 데스크탑 빌드 (Rust 필요)

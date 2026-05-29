@@ -1,8 +1,12 @@
 # Luida — Implementation Plan
 
+> ⚠️ **v1 (TypeScript) 아카이브** — 이 문서는 v1 설계 로드맵입니다. v2(Rust)는 ADR-0001 후
+> 전면 재작성됐습니다. **최신 설계 정본: [`docs/v2-standalone.md`](v2-standalone.md)** ·
+> 진행 기록: [`docs/reviews/v2-p*.md`](reviews/) · v1 코드: `git tag v1-typescript`.
+
 | | |
 |---|---|
-| **Status** | v1.0 |
+| **Status** | v1.0 (아카이브 — v2-standalone.md 로 대체) |
 | **Owner** | Roto |
 | **Last updated** | 2026-05-26 |
 | **Goal command** | `/goal` 활성 — 각 Phase 4-게이트 필수 |

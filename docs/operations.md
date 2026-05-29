@@ -3,290 +3,189 @@
 | | |
 |---|---|
 | **대상** | 처음 Luida를 띄우는 사용자 (= roto 본인) |
-| **환경** | macOS · cmux 0.63+ · Bun 1.3+ · worktrunk(`wt`) · `gh` CLI |
-| **버전** | v0.1 (Phase 0~5 + Web Track A 완료 시점) |
+| **버전** | v2 (Rust · Cargo) — ADR-0001 Accepted |
+| **환경** | macOS · Rust toolchain · (실 모드) `claude`/`codex` CLI · worktrunk(`wt`) · `gh` CLI |
+
+> v1(TypeScript/Bun) 운영 가이드는 `git tag v1-typescript` 시점의 이 파일을 참고하세요. 아래는 전부 v2(Rust) 기준입니다.
 
 ---
 
-## 1. 처음 설치
+## 1. 설치 · 빌드
 
-### 1.1 의존성 확인
+### 1.1 의존성
 ```bash
-bun --version       # 1.3+
-cmux --version      # 0.63+
-wt --version        # worktrunk
-gh --version        # GitHub CLI (PR 생성용, gh auth login 완료 상태)
-claude --version    # Claude Code 2.1.139+ (--session-id, /goal 지원)
+cargo --version     # Rust toolchain (rustup)
+# 아래는 "실 모드"(외부 LLM 실제 호출)에서만 필요 — 데모 모드는 불필요:
+claude --version    # Claude Code (claude 런타임)
+codex --version     # Codex CLI (codex 런타임, 선택)
+wt --version        # worktrunk — quest용 worktree 생성
+gh --version        # PR 생성 등 (선택)
 ```
 
-### 1.2 프로젝트 클론 + 의존성 설치
+### 1.2 빌드
 ```bash
 cd /Users/roto/workspace/luida
-bun install
-bun run typecheck                # 0 error 확인
-bun test                         # 전체 grean 확인
+cargo build --release      # target/release/luida
+cargo test                 # 전체 그린 확인
+cargo clippy --all-targets # 0 warning 확인
 ```
+`target/release/luida` 를 PATH에 두거나(`ln -s`) `cargo run --` 로 호출합니다. 이하 `luida` 는 이 바이너리.
 
-### 1.3 tavern.db 초기화
+### 1.3 초기화
 ```bash
-luida db init
-# 출력 예:
-#   🏮 루이다의 술집을 준비했어요.
-#      DB: /Users/roto/.luida/tavern.db
-#      새로 적용: 0001_init.sql, 0002_quest_source_inmail.sql
+luida db init        # ~/.luida/tavern.db 생성 + 마이그레이션
+luida agents init    # ~/.luida/agents.json 생성 (있으면 유지)
 ```
 
-런타임 데이터는 `~/.luida/`에 생성됩니다:
+런타임 데이터 경로 (env로 override 가능):
+
+| | 기본 | override |
+|---|---|---|
+| tavern.db | `~/.luida/tavern.db` | `LUIDA_DB_PATH` |
+| agents.json | `~/.luida/agents.json` | `LUIDA_AGENTS_PATH` |
+| memory vault | `~/.luida/memory` | `LUIDA_MEMORY_DIR` |
+
 ```
 ~/.luida/
-├── tavern.db                      # SQLite (WAL)
-├── tavern.db-wal
-├── tavern.db-shm
-├── memory/
-│   ├── chronicle.md               # 일지 (자동 rotation: 2MB 초과 시 월 아카이브)
-│   ├── projects/<name>.md
-│   └── patterns/YYYY-MM-DD-*.md
-└── relationships.yaml             # 자동화 룰 (선택)
+├── tavern.db                       # SQLite (WAL) — 모든 상태의 단일 진실
+├── agents.json                     # 런타임/모델/행위 매핑
+└── memory/                         # 모험의 서 (Obsidian 호환 vault)
+    ├── chronicle.md                # 일지 (롤링 기록)
+    ├── projects/<name>.md          # 프로젝트 맥락 (project ingest)
+    └── campaigns/<id>-<slug>.md    # 원정 보고서 (campaign report)
 ```
 
 ---
 
-## 2. cmux pane별 sidecar 띄우기
+## 2. `LUIDA_FAKE` 데모 — 외부 LLM 없이 전체 파이프라인
 
-각 프로젝트 cmux pane에서 Claude를 띄우기 전에 sidecar를 백그라운드로 시작합니다.
-
-### 2.1 표준 시작 패턴 (pane 첫 명령)
-```bash
-# 예: agora pane
-SESSION_NAME=agora \
-  nohup luida sidecar --me "$SESSION_NAME" \
-  > ~/.luida/log/$SESSION_NAME.log 2>&1 &
-exec claude
-```
-
-핵심:
-- `--me <name>`이 모험가 이름. `agora`, `admin`, `kontrol` 등 프로젝트별 고유.
-- cmux는 `CMUX_WORKSPACE_ID` / `CMUX_SURFACE_ID` 환경변수를 자동 주입 → sidecar가 이를 읽어 `adventurers` 테이블에 자기 등록.
-- `--auto-pr` 옵션을 추가하면 worker 작업 완료 후 PR 자동 생성. 안 주면 `needs_approval` 상태에서 멈춤 (사용자 승인 게이트).
-- 로그는 `~/.luida/log/<name>.log`로 누적. `tail -f`로 모니터링.
-
-### 2.2 wrapper 스크립트 사용 (권장)
-`scripts/cmux-pane.sh`를 이용해 한 줄로:
-```bash
-~/workspace/luida/scripts/cmux-pane.sh agora
-```
-
----
-
-## 3. 메인(루이다) pane — MCP 통합
-
-`packages/cli/src/index.ts`가 `luida mcp start`를 노출합니다. Claude Code의 MCP 설정에 등록하면 main pane Claude가 quest/adventurer/memory 도구를 즉시 호출할 수 있어요.
-
-### 3.1 Claude Code 프로젝트 MCP 설정
-프로젝트 루트(또는 `~/.claude/`)에 `.mcp.json`:
-```json
-{
-  "mcpServers": {
-    "luida": {
-      "command": "bun",
-      "args": ["run", "/Users/roto/workspace/luida/packages/cli/src/index.ts", "mcp", "start"],
-      "env": {}
-    }
-  }
-}
-```
-
-### 3.2 등록 확인 — main pane Claude에서
-```
-/mcp list
-```
-`luida`가 보이면 OK. 사용 가능 도구:
-- `quest.list` / `quest.get` / `quest.dispatch`
-- `adventurer.list`
-- `memory.recall` / `memory.record`
-
-### 3.3 첫 의뢰 발급
-main pane에서:
-> "agora에게 schema 마이그레이션 의뢰 보내줘"
-
-Claude가 `quest.dispatch({to: 'agora', brief: '...'})`를 호출하면 dispatch inmail이 들어가고, agora pane의 sidecar가 10초 안에 받아 prompt 주입 → worker 실행.
-
----
-
-## 4. brain daemon
-
-학습 + stuck quest 감지를 위해 brain을 한 번만 띄웁니다 (전체에 1 인스턴스).
-
-### 4.1 수동 (개발용)
-```bash
-luida brain start &
-# 또는 cmux pane 1개를 brain 전용으로 두기:
-luida brain start
-```
-
-### 4.2 launchd 자동 시작 (운영)
-`~/Library/LaunchAgents/com.daangn.luida-brain.plist`:
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.daangn.luida-brain</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/roto/.bun/bin/bun</string>
-    <string>run</string>
-    <string>/Users/roto/workspace/luida/packages/cli/src/index.ts</string>
-    <string>brain</string>
-    <string>start</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/roto/.luida/log/brain.log</string>
-  <key>StandardErrorPath</key><string>/Users/roto/.luida/log/brain.err.log</string>
-</dict>
-</plist>
-```
-로드:
-```bash
-launchctl load ~/Library/LaunchAgents/com.daangn.luida-brain.plist
-```
-
-### 4.3 검증
-```bash
-luida brain reflect          # 1회 즉시 reflect
-sqlite3 ~/.luida/tavern.db   # adventurers에 luida-brain row 있는지
-  > SELECT name, role, status, last_seen FROM adventurers;
-```
-
----
-
-## 5. 자동화 룰 (relationships.yaml)
-
-### 5.1 룰 작성
-`~/.luida/relationships.yaml`:
-```yaml
-relationships:
-  - name: agora-schema-to-admin
-    from: agora
-    trigger:
-      kind: path_changed
-      paths:
-        - "prisma/**"
-        - "schema/**"
-    to: admin
-    action: auto_dispatch
-    brief_template: "agora schema 변경 ({files})을 admin codegen에 반영"
-    enabled: true
-```
-
-### 5.2 동기화
-```bash
-luida sync-rules ~/.luida/relationships.yaml
-# 출력: 📜 룰 동기화 — 신규: 1 · 갱신: 0 · 실패: 0
-```
-
-### 5.3 학습 패턴 확인 → 승급
-brain이 자동 발견한 후보:
-```bash
-luida brain reflect
-# 출력: 🧠 reflect — 후보 N건, markdown N건, proposal N건
-#       • luida-to-agora (7.0/10, 5건)
-
-luida promote-pattern luida-to-agora --activate
-# 출력: 📜 패턴 승급 — luida-to-agora → relationship #2 · 활성 (auto_dispatch)
-```
-
----
-
-## 6. TUI 대시보드
+`LUIDA_FAKE=1` 이면 `claude`/`codex` 호출과 실제 git worktree 없이 **결정적 fake 런타임**으로 plan→run→report→reflect 를 끝까지 돌립니다. CI·시연·동작 확인용. 위 3개 경로 env를 임시 디렉터리로 잡으면 실제 `~/.luida` 데이터를 건드리지 않고 완전히 격리됩니다.
 
 ```bash
-luida ui
-```
-- `q` 종료
-- `Tab` / `Shift+Tab` 패널 전환
-- `j` / `k` 또는 화살표 항목 이동
+DEMO=$(mktemp -d /tmp/luida-demo.XXXXXX)
+export LUIDA_FAKE=1
+export LUIDA_DB_PATH="$DEMO/tavern.db"
+export LUIDA_AGENTS_PATH="$DEMO/agents.json"
+export LUIDA_MEMORY_DIR="$DEMO/memory"
 
----
-
-## 7. Web 대시보드 (beta)
-
-```bash
-luida web --port 4321
-```
-브라우저에서 `http://127.0.0.1:4321` 접속.
-
-추후 Tauri 래퍼(`Luida.app`)로 배포 예정 — Web Track B에서.
-
----
-
-## 8. dry-run 시나리오 (첫 검증)
-
-실제 cmux pane을 띄우기 전에 단일 머신에서 CLI만으로 전체 흐름 검증:
-
-### 8.1 모험가 시드 + dispatch
-```bash
-# DB 초기화
 luida db init
+luida agents init
+luida project add agora --path "$DEMO/agora" --desc "거래 서비스"
+luida project add admin --path "$DEMO/admin" --desc "관리 콘솔"
+luida project ingest agora           # → memory/projects/agora.md
 
-# 모험가 수동 등록 (sidecar 없이)
-sqlite3 ~/.luida/tavern.db <<SQL
-INSERT INTO adventurers (name, workspace_id, surface_id, role, status, last_seen, registered_at)
-VALUES
-  ('luida', 'w', 's', 'main', 'idle', strftime('%s','now')*1000, strftime('%s','now')*1000),
-  ('agora', 'w', 's', 'worker', 'idle', strftime('%s','now')*1000, strftime('%s','now')*1000),
-  ('admin', 'w', 's', 'worker', 'idle', strftime('%s','now')*1000, strftime('%s','now')*1000);
-SQL
+luida campaign plan "agora와 admin에 통합 검색 필터 추가"
+#   fake 플래너가 프롬프트의 "등록된 모험지: agora, admin" 을 파싱해
+#   q1(admin) → q2(agora) 의존성 체인 quest DAG 생성
+luida campaign run 1                  # 완료 2 / 대기 0 / 실패 0
+luida campaign report 1               # → memory/campaigns/0001-*.md
+luida reflect                         # 관계 제안 demo-link (비활성) 학습
+luida relationship list
+luida relationship enable demo-link   # 비활성 → 활성
 
-# 가상 dispatch
-sqlite3 ~/.luida/tavern.db <<SQL
-INSERT INTO inmail (from_session, to_session, kind, payload, created_at)
-VALUES ('luida', 'agora', 'dispatch',
-  json_object('brief', '테스트 의뢰', 'branch', 'feat/test'),
-  strftime('%s','now')*1000);
-SQL
-
-# brain reflect 후 dashboard 확인
-luida brain reflect
-luida ui
-# 의뢰 #1이 agora에게 pending으로 보임
+# 정리
+rm -rf "$DEMO"
 ```
 
-### 8.2 Web 확인
+### 동작 메커니즘
+- `LUIDA_FAKE` 판정: `crates/luida-cli/src/main.rs` 의 `is_fake()` → `make_factory()`(런타임)·`make_worktree()`(temp 디렉터리) 분기.
+- fake 이벤트: `crates/luida-runtimes/src/fake.rs` 의 `canned_events(action, prompt)`.
+  - `campaign.plan`·`learning.reflect` 는 프롬프트의 `등록된 모험지:` 줄을 파싱해 **실제 등록 프로젝트**로 계획·관계 제안 생성.
+  - `quest.execute`·`campaign.report`·`project.ingest`·`escalation.triage` 는 그럴듯한 canned 결과.
+
+### 생성 산출물 (vault)
+- `memory/projects/agora.md` — 프로젝트 맥락 요약
+- `memory/campaigns/0001-*.md` — 원정 보고서 (frontmatter + 본문)
+- `memory/chronicle.md` — 일지 누적
+
+---
+
+## 3. 실 모드 — 실제 에이전트로 원정 수행
+
+`LUIDA_FAKE` 없이 실행하면 `agents.json` 의 런타임(claude/codex)으로 실제 작업을 수행합니다.
+
+### 3.1 agents.json
+행위(action) → 런타임/모델/모드 매핑. 예시는 [`docs/examples/agents.json`](examples/agents.json).
 ```bash
-luida web --port 4321 &
+luida agents show                       # 현재 설정 요약
+luida agents resolve campaign.plan      # 특정 행위가 어떤 런타임/모델로 해소되는지
+luida agents resolve quest.execute --project agora   # 프로젝트별 override 포함
+```
+- `defaults.runtime`/`defaults.tier`, `runtimes.<name>`(kind·command·models·enabled), `actions.<action>`, `projectOverrides.<project>.<action>` 로 구성.
+- `agents resolve` 의 "사용가능" 행이 `아니오` 면 해당 CLI(claude/codex) 미설치.
+
+### 3.2 모험지 등록 → 원정
+```bash
+luida project add agora --path ~/workspace/agora --base main --desc "거래 서비스"
+luida project list
+
+luida campaign plan "agora에 검색 필터 기능 추가"   # LLM 플래너 → quest DAG
+luida campaign run 1
+#   각 quest 를 worktrunk worktree 에 worker 로 디스패치(의존성 순).
+#   escalation 발생 시 triage → 자동 해소 가능하면 자동 재개, 아니면 사용자 대기.
+luida campaign report 1                              # 완료 후 모험의 서 기록
+```
+
+### 3.3 escalation 대응
+원정 실행 중 worker가 판단을 요청(needs_input)하면:
+```bash
+luida campaign list                 # 진행 상황
+luida quest triage <id>             # 자동 해소 가능 여부 분류
+luida quest resume <id> "<답변>"    # 사용자 답변으로 재개
+```
+
+### 3.4 프로젝트 간 자동화 관계
+```bash
+luida reflect                          # 최근 이벤트 분석 → 관계 제안(비활성 저장)
+luida relationship list                # 활성·비활성 전체
+luida relationship enable <name>       # 학습 제안 승인 → 활성화
+luida relationship disable <name>
+```
+활성 관계는 quest 완료 시 평가되어 `auto_dispatch`(같은 원정에 후속 quest 추가) 또는 `propose`(사용자에게 제안)로 이어집니다. 관계 스키마 예시: [`docs/examples/relationships.yaml`](examples/relationships.yaml).
+
+### 3.5 모험 중단 · 재개 (기기 간 핸드오프)
+```bash
+luida adventure suspend <id> --out handoff.json   # 원정 봉인 → JSON
+luida adventure resume --from handoff.json        # 다른 기기에서 이어받기
+```
+
+---
+
+## 4. 대시보드
+
+### 4.1 TUI
+```bash
+luida ui
+```
+- `q` 종료 · `Tab`/`Shift+Tab` 탭 전환 · `j`/`k`·화살표 이동
+- 탭: 모험지(Projects) / 원정(Campaigns) / 모험(Quests), escalation 대기 카운트
+
+### 4.2 Web / GUI 브리지 (HTTP·SSE)
+```bash
+luida server start --port 4321
+curl -s http://127.0.0.1:4321/api/health
 curl -s http://127.0.0.1:4321/api/snapshot | head -c 200
 ```
+- `GET /api/snapshot` 초기 상태, `GET /api/stream` SSE 라이브 갱신, `POST /api/projects` 모험지 명령 (ADR-0002).
+- 프론트엔드(Vite/React)와 Tauri 래퍼는 [`packages/web`](../packages/web/README.md).
 
 ---
 
-## 9. 알려진 함정
-
-- **cmux #1472**: 프로그램이 만든(=새로 spawn한) workspace는 PTY가 죽어서 `cmux send-key`가 실패해요. **사용자가 GUI에서 직접 띄운 cmux pane**에서만 sidecar 사용.
-- **`wt c` alias**: 자동으로 `claude` REPL을 띄움. sidecar의 headless worker는 `wt switch --create --execute :` (no-op)로 우회. 사용자 직접 사용 시는 `wt c "<name>"` 권장.
-- **`gh pr create`**: `--head` 명시되지 않으면 worktree branch 추측 실패 가능. sidecar는 `wt.branch`를 항상 명시.
-- **headless worker 안전성**: 현재 `--dangerously-skip-permissions` 가정. 격리 강화는 Phase D(권한 모델)에서 본격화.
-- **brain daemon 1개만**: 다중 인스턴스는 lastReflectAt 공유 안 함. launchd로 단일 인스턴스 보장 권장.
-
----
-
-## 10. 트러블슈팅
+## 5. 트러블슈팅
 
 | 증상 | 원인 | 해결 |
 |---|---|---|
-| `cmux send-key` exit 1 | surface_id가 stale (cmux 재시작) | sidecar 재기동 → env 재읽기 |
-| 같은 inmail 두 번 처리 | source_inmail_id UNIQUE 위반 — 사실은 정상, dedupe 됨 | quest insertIdempotent가 기존 row 반환 |
-| worker가 hang | claude CLI 자체 hang 또는 stdin 대기 | `pkill -f 'claude -p'` 후 quest를 failed로 마킹 |
-| TUI 색상 깨짐 | terminal COLORTERM != truecolor | cmux/Ghostty는 항상 OK. 다른 환경은 미지원 |
-| `gh pr create` 실패 | gh auth 미완 또는 default repo 설정 부재 | `gh auth login` + `gh repo set-default` |
+| `cargo build` 실패: unresolved import | crate 의존성 누락 | 해당 `crates/*/Cargo.toml` 에 `*.workspace = true` 추가 |
+| `agents resolve` 사용가능=아니오 | claude/codex CLI 미설치 | 런타임 CLI 설치 또는 데모 모드(`LUIDA_FAKE=1`) 사용 |
+| `campaign plan` 실패: "등록된 모험지가 없습니다" | project 미등록 | `luida project add` 먼저 |
+| worktree 생성 실패 | `wt`(worktrunk) 미설치/경로 오류 | `wt --version` 확인, repo 경로 점검 (데모는 temp dir 사용) |
+| TUI 색상 깨짐 | 터미널 truecolor 미지원 | cmux/Ghostty 권장 |
 
 ---
 
-## 11. 다음 작업 (Phase 6+ 후보)
-- **C** 디렉터리 rename(`luida`) + git init
-- **B** Web Track B — Vite + TSX + Tauri shim
-- **D** PreToolUse hook으로 worktree 밖 접근 차단
-- **E** Zod schema validation 통일
+## 6. 다음 작업 (로드맵)
+- v2-standalone.md §8 의 미완 Phase: V2-P6(PTY 직접 관리), V2-P7(xterm.js 인터랙티브), V2-P9(Tauri 패키징)
+- 트리거 확장: `path_changed`·`tag_pushed` (git watcher) — 현재 `quest_completed` 만 구현
+- 관계 사이클 가드 (무한 연쇄 방지)
 
-자세한 로드맵: `docs/implementation-plan.md`, 각 `docs/reviews/phase-N.md`
+자세한 설계: [`docs/v2-standalone.md`](v2-standalone.md), Phase별 기록: [`docs/reviews/v2-p*.md`](reviews/).
