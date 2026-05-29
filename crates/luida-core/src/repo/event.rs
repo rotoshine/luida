@@ -60,6 +60,24 @@ impl<'a> EventRepo<'a> {
         )
     }
 
+    /// campaign의 events 타임라인 (오래된 순). TUI 상세 뷰용.
+    pub fn for_campaign(&self, campaign_id: i64, limit: i64) -> Result<Vec<Event>> {
+        self.query_many(
+            "SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at
+             FROM events WHERE campaign_id = ?1 ORDER BY occurred_at ASC, id ASC LIMIT ?2",
+            params![campaign_id, limit],
+        )
+    }
+
+    /// quest의 events 타임라인 (오래된 순). TUI 상세 뷰용.
+    pub fn for_quest(&self, quest_id: i64, limit: i64) -> Result<Vec<Event>> {
+        self.query_many(
+            "SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at
+             FROM events WHERE quest_id = ?1 ORDER BY occurred_at ASC, id ASC LIMIT ?2",
+            params![quest_id, limit],
+        )
+    }
+
     fn query_many(&self, sql: &str, p: &[&dyn rusqlite::ToSql]) -> Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(p, Self::map_row)?;
@@ -123,6 +141,53 @@ mod tests {
         repo.record(ev("c", "pr_created")).unwrap();
         assert_eq!(repo.by_kind("quest_dispatched", 10).unwrap().len(), 2);
         assert_eq!(repo.by_kind("pr_created", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn for_campaign_and_quest_filter_in_timeline_order() {
+        use crate::repo::{CampaignRepo, NewCampaign, NewQuest, ProjectRepo, QuestRepo};
+        let conn = setup();
+        // events.campaign_id/quest_id 는 FK라 실제 행이 있어야 한다.
+        ProjectRepo::new(&conn).add("agora", "/a", "main", None).unwrap();
+        let cid = CampaignRepo::new(&conn)
+            .insert(NewCampaign { title: "t", prompt: "p", plan_json: "{}", status: "running" })
+            .unwrap();
+        let qid = QuestRepo::new(&conn)
+            .insert(NewQuest {
+                campaign_id: Some(cid),
+                project: "agora",
+                brief: "b",
+                branch: None,
+                status: "running",
+                depends_on_quest_id: None,
+                source_inmail_id: None,
+            })
+            .unwrap();
+        let cid2 = CampaignRepo::new(&conn)
+            .insert(NewCampaign { title: "t2", prompt: "p", plan_json: "{}", status: "running" })
+            .unwrap();
+
+        let repo = EventRepo::new(&conn);
+        let mk = |campaign_id, quest_id, kind| NewEvent {
+            campaign_id,
+            quest_id,
+            actor: "x",
+            kind,
+            payload: "{}",
+        };
+        repo.record(mk(Some(cid), None, "campaign_planned")).unwrap();
+        repo.record(mk(Some(cid), Some(qid), "quest_dispatched")).unwrap();
+        repo.record(mk(Some(cid), Some(qid), "quest_completed")).unwrap();
+        repo.record(mk(Some(cid2), None, "campaign_planned")).unwrap();
+
+        let camp = repo.for_campaign(cid, 100).unwrap();
+        assert_eq!(camp.len(), 3);
+        assert_eq!(camp[0].kind, "campaign_planned"); // ASC 타임라인 순(가장 먼저 기록된 것)
+        assert!(camp.iter().all(|e| e.campaign_id == Some(cid)));
+
+        let q = repo.for_quest(qid, 100).unwrap();
+        assert_eq!(q.len(), 2);
+        assert!(q.iter().all(|e| e.quest_id == Some(qid)));
     }
 
     #[test]
