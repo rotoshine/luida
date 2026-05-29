@@ -21,8 +21,8 @@ use crossterm::terminal::{
 };
 use crossterm::{execute, ExecutableCommand};
 use luida_core::{
-    migrate, open_db, open_ready, Campaign, Connection, EventRepo, InmailRepo, Project, Quest,
-    CampaignRepo, ProjectRepo, QuestRepo,
+    is_fake, migrate, now_ms, open_db, open_ready, Campaign, Connection, EventRepo, InmailRepo,
+    Project, Quest, CampaignRepo, ProjectRepo, QuestRepo,
 };
 use luida_planner::{plan_campaign, run_campaign};
 use luida_runtimes::make_factory;
@@ -178,6 +178,12 @@ struct App {
     rx: Option<Receiver<WorkerMsg>>,
     /// 상세 뷰 (열려있을 때만 Some). events 타임라인을 폴링해 표시.
     detail: Option<Detail>,
+    /// 도움말 오버레이 표시 여부 (? 토글).
+    help: bool,
+    /// status 토스트가 설정된 시각(ms). 일정 시간 후 자동 소멸.
+    status_at: Option<i64>,
+    /// 렌더 틱 카운터 (스피너 애니메이션용).
+    tick: u64,
 }
 
 impl App {
@@ -193,9 +199,27 @@ impl App {
             running_label: None,
             rx: None,
             detail: None,
+            help: false,
+            status_at: None,
+            tick: 0,
         };
         app.reset_selection();
         app
+    }
+
+    /// status 토스트를 설정하고 시각을 기록 (자동 소멸 타이머용).
+    fn set_status(&mut self, msg: String) {
+        self.status = Some(msg);
+        self.status_at = Some(now_ms());
+    }
+
+    /// 다음 needs_input(판단대기) 모험으로 점프 (Quests 탭 + 선택). 없으면 무시.
+    fn jump_to_needs_input(&mut self) {
+        if let Some(i) = self.dash.quests.iter().position(|q| q.status == "needs_input") {
+            self.tab = Tab::Quests;
+            self.state.select(Some(i));
+            self.sync_detail_to_selection();
+        }
     }
 
     fn current_len(&self) -> usize {
@@ -342,6 +366,11 @@ fn spawn_worker(app: &mut App, cmd: Command, label: String) {
 /// 키 처리. quit이면 Ok(true).
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     let code = key.code;
+    // 도움말 오버레이가 열려있으면 아무 키나 눌러 닫는다.
+    if app.help {
+        app.help = false;
+        return Ok(false);
+    }
     // Shift/Alt+Enter → 개행 (터미널 keyboard enhancement 지원 시). 평범한 Enter → 제출.
     let newline = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
     match &app.mode {
@@ -419,6 +448,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         spawn_worker(app, Command::Run(id), format!("campaign run #{id}"));
                     }
                 }
+                // n(ㅜ): 다음 판단대기 모험으로 점프
+                KeyCode::Char('n' | 'ㅜ') => app.jump_to_needs_input(),
+                // ?: 도움말 오버레이
+                KeyCode::Char('?') => app.help = true,
                 KeyCode::Char('p' | 'ㅔ') => {
                     app.mode = Mode::Input(InputKind::PlanPrompt);
                     app.input.clear();
@@ -485,16 +518,26 @@ pub fn run(db_path: &Path) -> Result<()> {
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
+        app.tick = app.tick.wrapping_add(1);
+        // 결과 토스트 자동 소멸 (약 5초).
+        if let Some(at) = app.status_at {
+            if now_ms() - at > 5000 {
+                app.status = None;
+                app.status_at = None;
+            }
+        }
+
         terminal.draw(|f| draw(f, app))?;
 
         // 워커 완료 확인 (논블로킹).
         if let Some(rx) = &app.rx {
             match rx.try_recv() {
                 Ok(msg) => {
-                    app.status = Some(match msg {
+                    let text = match msg {
                         WorkerMsg::Done(s) => format!("✅ {s}"),
                         WorkerMsg::Failed(e) => format!("⚠ 실패: {e}"),
-                    });
+                    };
+                    app.set_status(text);
                     app.mode = Mode::Normal;
                     app.running_label = None;
                     app.rx = None;
@@ -502,7 +545,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    app.status = Some("⚠ 워커가 비정상 종료했습니다".to_string());
+                    app.set_status("⚠ 워커가 비정상 종료했습니다".to_string());
                     app.mode = Mode::Normal;
                     app.running_label = None;
                     app.rx = None;
@@ -540,6 +583,13 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // 헤더 — 탭 바 + 실행 상태
     let mut spans = vec![Span::styled("🍺 루이다  ", Style::default().fg(GOLD).bold())];
+    if is_fake() {
+        spans.push(Span::styled(
+            " 🧪 데모 ",
+            Style::default().fg(Color::Black).bg(Color::Rgb(0x6C, 0x8C, 0xFF)).bold(),
+        ));
+        spans.push(Span::raw(" "));
+    }
     for t in Tab::all() {
         let active = t == app.tab;
         spans.push(Span::styled(
@@ -553,8 +603,9 @@ fn draw(f: &mut Frame, app: &mut App) {
         spans.push(Span::raw(" "));
     }
     if let Some(label) = &app.running_label {
+        let dots = ".".repeat((app.tick / 2 % 4) as usize);
         spans.push(Span::styled(
-            format!(" ⏳ {label} "),
+            format!(" ⏳ {label}{dots} "),
             Style::default().fg(Color::Black).bg(GOLD).bold(),
         ));
     }
@@ -622,7 +673,7 @@ fn draw(f: &mut Frame, app: &mut App) {
                 if s.starts_with('⚠') { RED } else { GREEN },
             ),
             None => (
-                " Tab 탭 · j/k 이동 · Enter/d 상세 · x 실행 · p 계획 · r 재개 · t triage · q 종료 "
+                " Tab 탭 · j/k 이동 · Enter/d 상세 · x 실행 · p 계획 · n 판단대기 · ? 도움말 · q 종료 "
                     .to_string(),
                 DIM,
             ),
@@ -652,6 +703,41 @@ fn draw(f: &mut Frame, app: &mut App) {
                     .border_style(Style::default().fg(GOLD)),
             );
         f.render_widget(modal, area);
+    }
+
+    // 도움말 오버레이 (최상위)
+    if app.help {
+        let lines = [
+            "  키 도움말",
+            "",
+            "  Tab        탭 전환 (모험지 / 원정 / 모험)",
+            "  j / k      위 / 아래 이동",
+            "  Enter / d  선택 항목 상세(타임라인) 토글",
+            "  x          원정 실행 (원정 탭)",
+            "  p          새 원정 계획 (프롬프트 입력)",
+            "  r          모험 재개 (답변 입력)",
+            "  t          escalation triage",
+            "  n          다음 판단대기 모험으로 점프",
+            "  Esc        상세 / 도움말 닫기 (없으면 종료)",
+            "  q          종료",
+            "",
+            "  입력 중: Enter 제출 · Shift/Alt+Enter 개행 · Esc 취소",
+            "  한글 IME: q=ㅂ p=ㅔ r=ㄱ t=ㅅ j=ㅓ k=ㅏ d=ㅇ x=ㅌ n=ㅜ",
+            "",
+            "  아무 키나 눌러 닫기",
+        ];
+        let height = (lines.len() as u16 + 2).min(f.area().height.max(3));
+        let area = centered_rect(64, height, f.area());
+        f.render_widget(Clear, area);
+        let help = Paragraph::new(lines.join("\n"))
+            .style(Style::default().fg(Color::White))
+            .block(
+                Block::default()
+                    .title(" 🍺 루이다 도움말 ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(GOLD)),
+            );
+        f.render_widget(help, area);
     }
 }
 
@@ -964,6 +1050,44 @@ mod tests {
         assert!(app.detail.is_some());
         handle_key(&mut app, ev(KeyCode::Tab)).unwrap();
         assert!(app.detail.is_none());
+    }
+
+    #[test]
+    fn help_overlay_toggles() {
+        let conn = seeded();
+        let mut app = test_app(&conn);
+        handle_key(&mut app, ev(KeyCode::Char('?'))).unwrap();
+        assert!(app.help);
+        // 아무 키나 누르면 닫힘 (종료 아님)
+        assert!(!handle_key(&mut app, ev(KeyCode::Char('j'))).unwrap());
+        assert!(!app.help);
+    }
+
+    #[test]
+    fn jump_to_needs_input_selects_quest() {
+        let mut conn = open_memory().unwrap();
+        migrate(&mut conn).unwrap();
+        ProjectRepo::new(&conn).add("agora", "/a", "main", None).unwrap();
+        let cid = CampaignRepo::new(&conn)
+            .insert(NewCampaign { title: "t", prompt: "p", plan_json: "{}", status: "running" })
+            .unwrap();
+        let mk = |status| NewQuest {
+            campaign_id: Some(cid),
+            project: "agora",
+            brief: "b",
+            branch: None,
+            status,
+            depends_on_quest_id: None,
+            source_inmail_id: None,
+        };
+        QuestRepo::new(&conn).insert(mk("running")).unwrap();
+        QuestRepo::new(&conn).insert(mk("needs_input")).unwrap();
+
+        let mut app = App::new(Dashboard::load(&conn).unwrap(), PathBuf::from(":memory:"));
+        handle_key(&mut app, ev(KeyCode::Char('n'))).unwrap();
+        assert_eq!(app.tab, Tab::Quests);
+        let sel = app.state.selected().unwrap();
+        assert_eq!(app.dash.quests[sel].status, "needs_input");
     }
 
     #[test]
