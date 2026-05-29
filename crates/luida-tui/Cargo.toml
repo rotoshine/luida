@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 luida-core = { path = "../luida-core" }
+luida-planner = { path = "../luida-planner" }
+luida-sidecar = { path = "../luida-sidecar" }
+luida-runtimes = { path = "../luida-runtimes" }
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
