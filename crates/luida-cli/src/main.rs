@@ -427,7 +427,7 @@ fn main() -> Result<()> {
                 let mut conn = open_db(&db_path)?;
                 migrate(&mut conn)?;
                 let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(async move { luida_server::serve(port, conn).await })?;
+                rt.block_on(async move { luida_server::serve(port, conn, db_path).await })?;
             }
         },
         Cmd::Ui => {

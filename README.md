@@ -44,7 +44,7 @@ luida campaign report 1
 
 # 대시보드
 luida ui                        # TUI
-luida server start --port 4321  # HTTP/SSE (웹/GUI 브리지)
+luida server start --port 4321  # 웹 대시보드 → http://127.0.0.1:4321 (계획·실행 명령 가능)
 ```
 
 > `luida` 바이너리는 `cargo build` 후 `target/{debug,release}/luida` 에 생깁니다. PATH에 넣거나 `cargo run -- <명령>` 으로 실행하세요.
@@ -80,7 +80,7 @@ luida relationship list
 | `luida-planner` | 원정 계획·실행: LLM 프롬프트 → quest DAG 파싱·검증·위상정렬 → 의존성 순 디스패치 |
 | `luida-runtimes` | 실 런타임(claude/codex CLI) spawn + `FakeRuntime`(데모·테스트용 결정적 런타임) |
 | `luida-sidecar` | quest 오케스트레이션: worktree(worktrunk) 생성 · dispatch · escalation triage · 관계 트리거 |
-| `luida-server` | Axum HTTP/SSE — `/api/health` · `/api/snapshot` · `/api/stream` · `POST /api/projects` |
+| `luida-server` | Axum HTTP/SSE + **웹 대시보드**(임베드 HTML) + 명령 API(plan/run·resume/triage) |
 | `luida-tui` | ratatui 대시보드 (Projects / Campaigns / Quests 탭) |
 | `luida-cli` | 단일 진입점 `luida` |
 

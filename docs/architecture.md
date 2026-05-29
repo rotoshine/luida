@@ -2,7 +2,7 @@
 
 > 이 문서는 **현재 구현된 코드의 전체 구조**를 Rust에 익숙하지 않아도 따라올 수 있게 설명합니다.
 > 설계 정본(왜 이렇게 설계했나)은 [`v2-standalone.md`](v2-standalone.md), 운영법은 [`operations.md`](operations.md).
-> 기능을 추가할 때마다 이 문서도 함께 갱신합니다. (마지막 갱신: TUI 진행 바(Gauge) + 원정 목록 완료/전체 진행도)
+> 기능을 추가할 때마다 이 문서도 함께 갱신합니다. (마지막 갱신: 웹 UI — luida-server 명령 API + 임베드 대시보드 `dashboard.html`)
 
 ---
 
@@ -182,3 +182,15 @@ pub trait WorktreeProvider {
 - `cargo build` 빌드 / `cargo test` 단위 테스트 / `cargo clippy --all-targets` 린트(경고 0 유지).
 - 핵심 로직은 `FakeRuntime` + 인메모리 DB(`open_memory`)로 외부 의존 없이 테스트.
 - 전체 흐름 시연: `LUIDA_FAKE=1` + 임시 경로 env로 격리 ([operations.md](operations.md) 데모 섹션).
+
+---
+
+## 9. 웹 UI (luida-server 임베드 대시보드)
+
+`luida server start --port 4321` → 브라우저 `http://127.0.0.1:4321`. **별도 빌드/Node 없이** 바이너리에 임베드된 단일 HTML(`crates/luida-server/src/dashboard.html`, vanilla JS)을 `include_str!`로 서빙합니다.
+
+- **읽기**: `GET /api/snapshot`(1회) + `GET /api/stream`(SSE 1초) → projects/campaigns/quests/inmail 실시간 표시.
+- **명령**: `POST /api/campaigns/plan`(원정 계획) · `POST /api/campaigns/{id}/run`(실행) · `POST /api/quests/{id}/resume|triage`. 프론트의 버튼·폼이 이 API를 호출.
+- **동시성 핵심**: 읽기(snapshot/stream)는 `AppState`의 `Arc<Mutex<Connection>>`를 쓰지만, **명령 핸들러는 그 Mutex를 잡지 않고 `db_path`로 별도 connection을 연다**(`spawn_blocking` 안). `run_campaign`이 수십 초 걸려도 snapshot/stream이 안 멈춥니다(WAL 동시 read/write).
+- TUI와 **같은 백엔드 함수**(`plan_campaign`/`run_campaign`/`resume_quest`/`triage_escalation`)를 호출 — 표면(터미널 vs 브라우저)만 다르고 핵심 로직은 공유.
+- (참고) `packages/web`의 React prototype은 v1 모델(adventurers 등) 기준이라, 현재 v2 웹 UI의 정본은 이 임베드 대시보드입니다. React/Tauri 트랙은 후속.

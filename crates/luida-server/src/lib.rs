@@ -6,22 +6,32 @@
 //! rusqlite Connection은 !Sync라 Arc<Mutex<Connection>>로 공유.
 
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::Result;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::response::IntoResponse;
+use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use luida_core::{CampaignRepo, Connection, InmailRepo, ProjectRepo, QuestRepo};
+use luida_core::{open_ready, CampaignRepo, Connection, InmailRepo, ProjectRepo, QuestRepo};
+use luida_planner::{plan_campaign, run_campaign};
+use luida_runtimes::make_factory;
+use luida_sidecar::{make_worktree, resume_quest, triage_escalation};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-/// 공유 상태 — DB connection (Mutex로 Sync 확보).
-pub type AppState = Arc<Mutex<Connection>>;
+/// 공유 상태 — 읽기용 DB connection(Mutex) + 명령용 db 경로.
+/// 명령(plan/run/resume)은 오래 걸리므로 read conn 의 Mutex 를 잡지 않고
+/// db_path 로 별도 connection 을 열어 실행한다(WAL 동시 read/write).
+#[derive(Clone)]
+pub struct AppState {
+    conn: Arc<Mutex<Connection>>,
+    db_path: PathBuf,
+}
 
 /// Mutex poisoning을 복구해 잠금 (한 핸들러의 패닉이 서버 전체를 죽이지 않게). review C3.
 fn lock_recover(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
@@ -31,7 +41,7 @@ fn lock_recover(m: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
 /// 동기 SQLite 쿼리를 blocking 풀에서 실행 (tokio 워커 블로킹 방지). review C2.
 async fn snapshot_blocking(state: AppState) -> Value {
     tokio::task::spawn_blocking(move || {
-        let conn = lock_recover(&state);
+        let conn = lock_recover(&state.conn);
         snapshot_json(&conn).unwrap_or_else(|e| json!({ "error": e.to_string() }))
     })
     .await
@@ -41,11 +51,21 @@ async fn snapshot_blocking(state: AppState) -> Value {
 /// 라우터 구성. 테스트는 이걸 직접 oneshot 호출.
 pub fn build_router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(index))
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
         .route("/api/stream", get(stream))
         .route("/api/projects", post(create_project))
+        .route("/api/campaigns/plan", post(plan_http))
+        .route("/api/campaigns/{id}/run", post(run_http))
+        .route("/api/quests/{id}/resume", post(resume_http))
+        .route("/api/quests/{id}/triage", post(triage_http))
         .with_state(state)
+}
+
+/// 웹 대시보드 (단일 HTML, 바이너리에 임베드).
+async fn index() -> impl IntoResponse {
+    Html(include_str!("dashboard.html"))
 }
 
 async fn health() -> &'static str {
@@ -74,7 +94,7 @@ async fn create_project(
     }
     let name = req.name.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let conn = lock_recover(&state);
+        let conn = lock_recover(&state.conn);
         ProjectRepo::new(&conn).add(
             &req.name,
             &req.repo_path,
@@ -91,6 +111,88 @@ async fn create_project(
             Json(json!({ "error": format!("join error: {e}") })),
         ),
     }
+}
+
+/// spawn_blocking 의 `Result<Result<Value>, JoinError>` 를 HTTP 응답으로 변환.
+fn json_result(
+    r: std::result::Result<Result<Value>, tokio::task::JoinError>,
+) -> (StatusCode, Json<Value>) {
+    match r {
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, Json(json!({ "error": e.to_string() }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("join error: {e}") })),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct PlanReq {
+    prompt: String,
+}
+
+/// POST /api/campaigns/plan — 사용자 프롬프트 → 원정 계획.
+async fn plan_http(State(state): State<AppState>, Json(req): Json<PlanReq>) -> impl IntoResponse {
+    let db = state.db_path.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (mut conn, cfg) = open_ready(&db)?;
+        let cid = plan_campaign(&mut conn, &cfg, &req.prompt, make_factory())?;
+        Ok(json!({ "campaign_id": cid }))
+    })
+    .await;
+    json_result(r)
+}
+
+/// POST /api/campaigns/{id}/run — 원정 실행(의존성 순, 완료까지 블로킹).
+async fn run_http(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let db = state.db_path.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (mut conn, cfg) = open_ready(&db)?;
+        let report = run_campaign(&mut conn, &cfg, id, make_worktree().as_ref(), make_factory())?;
+        Ok(json!({
+            "completed": report.completed.len(),
+            "needs_input": report.needs_input.len(),
+            "failed": report.failed.len(),
+            "triggered": report.triggered,
+            "all_completed": report.all_completed,
+        }))
+    })
+    .await;
+    json_result(r)
+}
+
+#[derive(Deserialize)]
+struct ResumeReq {
+    answer: String,
+}
+
+/// POST /api/quests/{id}/resume — needs_input 모험을 답변으로 재개.
+async fn resume_http(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<ResumeReq>,
+) -> impl IntoResponse {
+    let db = state.db_path.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (mut conn, cfg) = open_ready(&db)?;
+        let out = resume_quest(&mut conn, &cfg, id, &req.answer, make_factory())?;
+        Ok(json!({ "outcome": format!("{out:?}") }))
+    })
+    .await;
+    json_result(r)
+}
+
+/// POST /api/quests/{id}/triage — escalation 분류(자동 해소 가능 여부).
+async fn triage_http(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    let db = state.db_path.clone();
+    let r = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let (mut conn, cfg) = open_ready(&db)?;
+        let d = triage_escalation(&mut conn, &cfg, id, make_factory())?;
+        Ok(json!({ "ask_user": d.ask_user, "auto_answer": d.auto_answer, "reason": d.reason }))
+    })
+    .await;
+    json_result(r)
 }
 
 /// tavern.db 스냅샷 JSON.
@@ -130,8 +232,11 @@ async fn stream(
 }
 
 /// 서버 실행 (127.0.0.1:port). luida server start에서 호출.
-pub async fn serve(port: u16, conn: Connection) -> Result<()> {
-    let state: AppState = Arc::new(Mutex::new(conn));
+pub async fn serve(port: u16, conn: Connection, db_path: PathBuf) -> Result<()> {
+    let state = AppState {
+        conn: Arc::new(Mutex::new(conn)),
+        db_path,
+    };
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -175,7 +280,10 @@ mod tests {
                 })
                 .unwrap();
         }
-        Arc::new(Mutex::new(conn))
+        AppState {
+            conn: Arc::new(Mutex::new(conn)),
+            db_path: std::path::PathBuf::from(":memory:"),
+        }
     }
 
     #[tokio::test]
