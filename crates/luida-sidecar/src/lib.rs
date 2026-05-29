@@ -16,4 +16,4 @@ pub use dispatch::{
 };
 pub use escalation::{notify_user_escalation, triage_escalation, TriageDecision};
 pub use triggers::{fire_quest_completed, TriggerResult};
-pub use worktree::{Worktree, WorktreeProvider, WorktrunkProvider};
+pub use worktree::{make_worktree, TempWorktree, Worktree, WorktreeProvider, WorktrunkProvider};

@@ -2,67 +2,16 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use luida_core::agents::{default_agents_path, AgentRuntime, ResolvedAgent};
+use luida_core::agents::default_agents_path;
 use luida_core::{
-    machine_id, resolve, resume_bundle, runtime_available, suspend_campaign, AgentsConfig,
-    CampaignRepo, Connection, HandoffBundle, ProjectRepo, QuestRepo, RelationshipRepo,
+    machine_id, open_ready, resolve, resume_bundle, runtime_available, suspend_campaign,
+    AgentsConfig, CampaignRepo, HandoffBundle, ProjectRepo, QuestRepo, RelationshipRepo,
     default_db_path, migrate, open_db,
 };
 use luida_brain::{ingest_project, reflect, report_campaign, MemoryVault};
 use luida_planner::{plan_campaign, run_campaign};
-use luida_runtimes::runtime_for_kind;
-use luida_runtimes::fake_runtime_for;
-use luida_sidecar::{resume_quest, triage_escalation, Worktree, WorktreeProvider, WorktrunkProvider};
-
-/// 데모 모드 여부 — LUIDA_FAKE=1이면 외부 LLM/repo 없이 결정적 fake 런타임 사용.
-fn is_fake() -> bool {
-    std::env::var("LUIDA_FAKE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-/// 런타임 factory — fake면 결정적 데모 런타임, 아니면 로컬 CLI(claude/codex).
-fn make_factory() -> impl Fn(&ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
-    let fake = is_fake();
-    move |r: &ResolvedAgent| {
-        if fake {
-            Ok(fake_runtime_for(&r.action))
-        } else {
-            runtime_for_kind(&r.kind, r.command.as_deref())
-        }
-    }
-}
-
-/// 데모용 worktree provider — wt/git 없이 temp 디렉터리 생성.
-struct TempWorktree;
-impl WorktreeProvider for TempWorktree {
-    fn create(&self, _repo: &std::path::Path, codename: &str) -> Result<Worktree> {
-        let safe: String = codename.chars().map(|c| if c == '/' { '-' } else { c }).collect();
-        let dir = std::env::temp_dir().join("luida-fake-wt").join(safe);
-        std::fs::create_dir_all(&dir)?;
-        Ok(Worktree {
-            branch: codename.to_string(),
-            path: dir,
-        })
-    }
-}
-
-/// 현재 모드에 맞는 worktree provider.
-fn make_worktree() -> Box<dyn WorktreeProvider> {
-    if is_fake() {
-        Box::new(TempWorktree)
-    } else {
-        Box::new(WorktrunkProvider::default())
-    }
-}
-
-/// db 열고 마이그레이션 + agents.json 로드.
-fn open_ready(db_path: &std::path::Path) -> Result<(Connection, AgentsConfig)> {
-    let mut conn = open_db(db_path)?;
-    migrate(&mut conn)?;
-    let cfg = AgentsConfig::load_or_default(&default_agents_path())?;
-    Ok((conn, cfg))
-}
+use luida_runtimes::make_factory;
+use luida_sidecar::{make_worktree, resume_quest, triage_escalation};
 
 #[derive(Parser)]
 #[command(

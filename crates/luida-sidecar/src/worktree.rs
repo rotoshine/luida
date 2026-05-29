@@ -107,3 +107,30 @@ impl WorktreeProvider for WorktrunkProvider {
         })
     }
 }
+
+/// 데모용 worktree provider — `wt`/git 없이 temp 디렉터리만 생성.
+pub struct TempWorktree;
+
+impl WorktreeProvider for TempWorktree {
+    fn create(&self, _repo: &Path, codename: &str) -> Result<Worktree> {
+        let safe: String = codename
+            .chars()
+            .map(|c| if c == '/' { '-' } else { c })
+            .collect();
+        let dir = std::env::temp_dir().join("luida-fake-wt").join(safe);
+        std::fs::create_dir_all(&dir)?;
+        Ok(Worktree {
+            branch: codename.to_string(),
+            path: dir,
+        })
+    }
+}
+
+/// 현재 모드에 맞는 worktree provider — `LUIDA_FAKE`면 temp, 아니면 worktrunk.
+pub fn make_worktree() -> Box<dyn WorktreeProvider> {
+    if luida_core::is_fake() {
+        Box::new(TempWorktree)
+    } else {
+        Box::new(WorktrunkProvider::default())
+    }
+}

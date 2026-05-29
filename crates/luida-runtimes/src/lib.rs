@@ -186,6 +186,19 @@ impl AgentRuntime for CodexCliRuntime {
     }
 }
 
+/// 런타임 factory — `LUIDA_FAKE`면 결정적 데모 런타임, 아니면 로컬 CLI(claude/codex).
+/// CLI·TUI 공용. (클로저는 Clone 불가라 각 호출 사이트에서 생성한다.)
+pub fn make_factory() -> impl Fn(&luida_core::ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
+    let fake = luida_core::is_fake();
+    move |r: &luida_core::ResolvedAgent| {
+        if fake {
+            Ok(fake_runtime_for(&r.action))
+        } else {
+            runtime_for_kind(&r.kind, r.command.as_deref())
+        }
+    }
+}
+
 /// runtime kind 문자열 → AgentRuntime. openai-compatible은 backlog → 명확한 에러.
 pub fn runtime_for_kind(kind: &str, command: Option<&str>) -> Result<Box<dyn AgentRuntime>> {
     match kind {
