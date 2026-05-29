@@ -11,20 +11,24 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use crossterm::{execute, ExecutableCommand};
 use luida_core::{
-    migrate, open_db, open_ready, Campaign, Connection, InmailRepo, Project, Quest, CampaignRepo,
-    ProjectRepo, QuestRepo,
+    migrate, open_db, open_ready, Campaign, Connection, EventRepo, InmailRepo, Project, Quest,
+    CampaignRepo, ProjectRepo, QuestRepo,
 };
 use luida_planner::{plan_campaign, run_campaign};
 use luida_runtimes::make_factory;
 use luida_sidecar::{make_worktree, resume_quest, triage_escalation};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 const GOLD: Color = Color::Rgb(0xFC, 0xD3, 0x4D);
 const DIM: Color = Color::Rgb(0x8A, 0xA0, 0xC0);
@@ -107,6 +111,20 @@ enum WorkerMsg {
     Failed(String),
 }
 
+/// 상세 뷰 대상 (원정 또는 모험).
+#[derive(Clone)]
+enum DetailTarget {
+    Campaign(i64),
+    Quest(i64),
+}
+
+/// 원정/모험 상세 뷰 — events 타임라인 (별도 read conn 으로 폴링 갱신).
+struct Detail {
+    target: DetailTarget,
+    title: String,
+    lines: Vec<String>,
+}
+
 /// 명령을 동기 실행하고 결과 요약을 반환. 워커 스레드와 테스트에서 호출한다.
 /// factory/worktree/conn 은 이 함수 안에서 생성 → 스레드로 넘길 값은 db_path·파라미터뿐.
 pub fn dispatch(db_path: &Path, cmd: Command) -> Result<String> {
@@ -158,6 +176,8 @@ struct App {
     running_label: Option<String>,
     /// 워커 결과 채널 (Running 동안만 Some).
     rx: Option<Receiver<WorkerMsg>>,
+    /// 상세 뷰 (열려있을 때만 Some). events 타임라인을 폴링해 표시.
+    detail: Option<Detail>,
 }
 
 impl App {
@@ -172,6 +192,7 @@ impl App {
             status: None,
             running_label: None,
             rx: None,
+            detail: None,
         };
         app.reset_selection();
         app
@@ -240,6 +261,62 @@ impl App {
         }
         Ok(())
     }
+
+    /// 현재 선택 항목 기준 DetailTarget (Projects 탭은 타임라인 없음 → None).
+    fn target_for_selection(&self) -> Option<DetailTarget> {
+        match self.tab {
+            Tab::Campaigns => self.selected_campaign().map(|c| DetailTarget::Campaign(c.id)),
+            Tab::Quests => self.selected_quest().map(|q| DetailTarget::Quest(q.id)),
+            Tab::Projects => None,
+        }
+    }
+
+    /// 상세 뷰 토글: 닫혀있으면 현재 선택으로 열고, 열려있으면 닫는다.
+    fn toggle_detail(&mut self) {
+        if self.detail.is_some() {
+            self.detail = None;
+            return;
+        }
+        if let Some(target) = self.target_for_selection() {
+            self.detail = Some(Detail { target, title: String::new(), lines: Vec::new() });
+            let _ = self.refresh_detail(); // 조회 실패해도 빈 상세로 열림
+        }
+    }
+
+    /// 상세가 열려있을 때 j/k 이동 시 현재 선택 항목으로 대상을 갱신.
+    fn sync_detail_to_selection(&mut self) {
+        if self.detail.is_none() {
+            return;
+        }
+        match self.target_for_selection() {
+            Some(target) => {
+                self.detail = Some(Detail { target, title: String::new(), lines: Vec::new() });
+                let _ = self.refresh_detail();
+            }
+            None => self.detail = None,
+        }
+    }
+
+    /// 상세 대상의 events 타임라인을 별도 read conn 으로 재조회 (실시간 폴링).
+    fn refresh_detail(&mut self) -> Result<()> {
+        let target = match &self.detail {
+            Some(d) => d.target.clone(),
+            None => return Ok(()),
+        };
+        let conn = open_db(&self.db_path)?;
+        let repo = EventRepo::new(&conn);
+        let (title, events) = match target {
+            DetailTarget::Campaign(id) => (format!("원정 #{id} 진행"), repo.for_campaign(id, 200)?),
+            DetailTarget::Quest(id) => (format!("모험 q{id} 진행"), repo.for_quest(id, 200)?),
+        };
+        let lines = if events.is_empty() {
+            vec!["(아직 기록된 진행이 없습니다)".to_string()]
+        } else {
+            events.iter().map(format_event).collect()
+        };
+        self.detail = Some(Detail { target, title, lines });
+        Ok(())
+    }
 }
 
 /// 명령을 백그라운드 워커로 띄운다 (Running 중이면 무시 — 동시 1개).
@@ -263,7 +340,10 @@ fn spawn_worker(app: &mut App, cmd: Command, label: String) {
 }
 
 /// 키 처리. quit이면 Ok(true).
-fn handle_key(app: &mut App, code: KeyCode) -> Result<bool> {
+fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    let code = key.code;
+    // Shift/Alt+Enter → 개행 (터미널 keyboard enhancement 지원 시). 평범한 Enter → 제출.
+    let newline = key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
     match &app.mode {
         // 실행 중엔 입력 무시 (완료까지 대기). 채널 수신 시 자동 해제.
         Mode::Running => Ok(false),
@@ -273,6 +353,9 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<bool> {
                 KeyCode::Esc => {
                     app.mode = Mode::Normal;
                     app.input.clear();
+                }
+                KeyCode::Enter if newline => {
+                    app.input.push('\n');
                 }
                 KeyCode::Enter => {
                     let text = app.input.trim().to_string();
@@ -302,30 +385,52 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<bool> {
             }
             Ok(false)
         }
+        // 한글 IME 켠 상태에서도 동작하도록 두벌식 자모(같은 물리 키)를 함께 매핑한다.
+        // q→ㅂ · p→ㅔ · r→ㄱ · t→ㅅ · j→ㅓ · k→ㅏ · d→ㅇ · x→ㅌ (한영 무관).
         Mode::Normal => {
             match code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
-                KeyCode::Tab => app.switch_tab(),
-                KeyCode::Down | KeyCode::Char('j') => app.next(),
-                KeyCode::Up | KeyCode::Char('k') => app.prev(),
-                KeyCode::Char('p') => {
-                    app.mode = Mode::Input(InputKind::PlanPrompt);
-                    app.input.clear();
+                KeyCode::Char('q' | 'ㅂ') => return Ok(true),
+                KeyCode::Esc => {
+                    // 상세 뷰가 열려있으면 닫기, 아니면 종료.
+                    if app.detail.is_some() {
+                        app.detail = None;
+                    } else {
+                        return Ok(true);
+                    }
                 }
-                KeyCode::Enter => {
+                KeyCode::Tab => {
+                    app.detail = None;
+                    app.switch_tab();
+                }
+                KeyCode::Down | KeyCode::Char('j' | 'ㅓ') => {
+                    app.next();
+                    app.sync_detail_to_selection();
+                }
+                KeyCode::Up | KeyCode::Char('k' | 'ㅏ') => {
+                    app.prev();
+                    app.sync_detail_to_selection();
+                }
+                // Enter / d(ㅇ): 선택 항목 상세 뷰(events 타임라인) 토글
+                KeyCode::Enter | KeyCode::Char('d' | 'ㅇ') => app.toggle_detail(),
+                // x(ㅌ): 선택 원정 실행 (Campaigns 탭)
+                KeyCode::Char('x' | 'ㅌ') => {
                     let id = app.selected_campaign().map(|c| c.id);
                     if let Some(id) = id {
                         spawn_worker(app, Command::Run(id), format!("campaign run #{id}"));
                     }
                 }
-                KeyCode::Char('r') => {
+                KeyCode::Char('p' | 'ㅔ') => {
+                    app.mode = Mode::Input(InputKind::PlanPrompt);
+                    app.input.clear();
+                }
+                KeyCode::Char('r' | 'ㄱ') => {
                     let qid = app.selected_quest().map(|q| q.id);
                     if let Some(qid) = qid {
                         app.mode = Mode::Input(InputKind::ResumeAnswer { quest_id: qid });
                         app.input.clear();
                     }
                 }
-                KeyCode::Char('t') => {
+                KeyCode::Char('t' | 'ㅅ') => {
                     let qid = app.selected_quest().map(|q| q.id);
                     if let Some(qid) = qid {
                         spawn_worker(app, Command::Triage(qid), format!("quest triage q{qid}"));
@@ -339,9 +444,14 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<bool> {
 }
 
 /// 터미널 상태 복원을 RAII로 보장 (패닉·에러 경로 unwind 시 Drop으로 복원).
-struct TerminalGuard;
+struct TerminalGuard {
+    enhanced: bool,
+}
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.enhanced {
+            let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+        }
         let _ = disable_raw_mode();
         let _ = execute!(stdout(), LeaveAlternateScreen);
     }
@@ -357,7 +467,15 @@ pub fn run(db_path: &Path) -> Result<()> {
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
-    let _guard = TerminalGuard;
+    // Shift/Alt+Enter 등 수정자+Enter 구분을 위해 keyboard enhancement (지원 터미널만).
+    let enhanced = matches!(supports_keyboard_enhancement(), Ok(true));
+    if enhanced {
+        let _ = execute!(
+            stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+    let _guard = TerminalGuard { enhanced };
 
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     let result = run_loop(&mut terminal, &mut app);
@@ -392,13 +510,20 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) ->
             }
         }
 
+        // 상세 뷰가 열려있으면 events 재조회 (실시간 진행 반영). 실패는 다음 틱 재시도.
+        if app.detail.is_some() {
+            let _ = app.refresh_detail();
+        }
+
         // 키 입력 폴링 (150ms 타임아웃 → 워커 진행 중에도 UI 갱신).
+        // 조합 중 잦은 재렌더가 IME preedit 를 깨뜨려, 입력당 즉시 redraw 보다
+        // "다음 draw 에서 반영" 방식이 한글 조합과 덜 충돌한다.
         if event::poll(Duration::from_millis(150))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                if handle_key(app, key.code)? {
+                if handle_key(app, key)? {
                     break;
                 }
             }
@@ -444,20 +569,38 @@ fn draw(f: &mut Frame, app: &mut App) {
     );
     f.render_widget(header, chunks[0]);
 
-    // 본문 — 탭별 목록
+    // 본문 — 상세 뷰가 열려있으면 좌(목록)/우(타임라인) 분할, 아니면 전체 폭 목록.
+    let list_area = if let Some(detail) = &app.detail {
+        let body = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(chunks[1]);
+        let panel = Paragraph::new(detail.lines.join("\n"))
+            .style(Style::default().fg(Color::White))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(format!(" {} (Esc 닫기) ", detail.title))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(GREEN)),
+            );
+        f.render_widget(panel, body[1]);
+        body[0]
+    } else {
+        chunks[1]
+    };
+
     let (items, empty_hint) = tab_items(app);
     if items.is_empty() {
         let empty = Paragraph::new(empty_hint)
             .style(Style::default().fg(DIM))
             .block(tab_block(app, 0));
-        f.render_widget(empty, chunks[1]);
+        f.render_widget(empty, list_area);
     } else {
         let count = items.len();
         let list = List::new(items)
             .block(tab_block(app, count))
             .highlight_style(Style::default().bg(Color::Rgb(0x1e, 0x2d, 0x44)).fg(GOLD))
             .highlight_symbol("▶ ");
-        f.render_stateful_widget(list, chunks[1], &mut app.state);
+        f.render_stateful_widget(list, list_area, &mut app.state);
     }
 
     // 푸터 — 모드별 동적 힌트 / 상태 토스트
@@ -469,14 +612,18 @@ fn draw(f: &mut Frame, app: &mut App) {
             ),
             GOLD,
         ),
-        Mode::Input(_) => (" Enter 제출 · Esc 취소 ".to_string(), GOLD),
+        Mode::Input(_) => (
+            " Enter 제출 · Shift/Alt+Enter 개행 · Esc 취소 ".to_string(),
+            GOLD,
+        ),
         Mode::Normal => match &app.status {
             Some(s) => (
                 format!(" {s}  ·  q 종료 "),
                 if s.starts_with('⚠') { RED } else { GREEN },
             ),
             None => (
-                " Tab 탭 · j/k 이동 · p 계획 · Enter 실행 · r 재개 · t triage · q 종료 ".to_string(),
+                " Tab 탭 · j/k 이동 · Enter/d 상세 · x 실행 · p 계획 · r 재개 · t triage · q 종료 "
+                    .to_string(),
                 DIM,
             ),
         },
@@ -484,24 +631,26 @@ fn draw(f: &mut Frame, app: &mut App) {
     let footer = Paragraph::new(Span::styled(footer_text, Style::default().fg(footer_color)));
     f.render_widget(footer, chunks[2]);
 
-    // 입력 모달 (오버레이)
+    // 입력 모달 (오버레이) — 멀티라인 지원
     if let Mode::Input(kind) = &app.mode {
         let label = match kind {
-            InputKind::PlanPrompt => "원정 계획 — 프롬프트 입력",
-            InputKind::ResumeAnswer { .. } => "모험 재개 — 답변 입력",
+            InputKind::PlanPrompt => "원정 계획 — 프롬프트 (Shift/Alt+Enter 개행)",
+            InputKind::ResumeAnswer { .. } => "모험 재개 — 답변 (Shift/Alt+Enter 개행)",
         };
-        let area = centered_rect(70, 3, f.area());
+        let body = format!("{}█", app.input);
+        let rows = body.split('\n').count() as u16;
+        let height = (rows + 2).clamp(3, f.area().height.max(3));
+        let area = centered_rect(70, height, f.area());
         f.render_widget(Clear, area);
-        let modal = Paragraph::new(Line::from(vec![
-            Span::styled(app.input.clone(), Style::default().fg(GREEN)),
-            Span::styled("█", Style::default().fg(GOLD)),
-        ]))
-        .block(
-            Block::default()
-                .title(format!(" {label} "))
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(GOLD)),
-        );
+        let modal = Paragraph::new(body)
+            .style(Style::default().fg(GREEN))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(format!(" {label} "))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(GOLD)),
+            );
         f.render_widget(modal, area);
     }
 }
@@ -585,6 +734,30 @@ fn status_color(status: &str) -> Style {
     Style::default().fg(c)
 }
 
+/// Event 1건 → 상세 타임라인 한 줄. payload(JSON/문자열)는 앞부분만 요약.
+fn format_event(e: &luida_core::Event) -> String {
+    let (icon, label) = match e.kind.as_str() {
+        "campaign_planned" => ("📋", "계획"),
+        "quest_dispatched" => ("⚙", "디스패치"),
+        "quest_resumed" => ("▶", "재개"),
+        "tool_use" => ("🔧", "도구"),
+        "quest_completed" => ("✅", "완료"),
+        "quest_needs_input" => ("⚠", "판단대기"),
+        "quest_failed" => ("✗", "실패"),
+        "escalation" => ("❓", "질문"),
+        "trigger_dispatched" => ("🔗", "트리거"),
+        other => ("·", other),
+    };
+    let p = e.payload.trim();
+    let payload = if p.is_empty() || p == "{}" {
+        String::new()
+    } else {
+        let s: String = p.chars().take(80).collect();
+        format!("  {s}")
+    };
+    format!("{icon} {label} · {}{payload}", e.actor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -630,6 +803,16 @@ mod tests {
 
     fn test_app(conn: &Connection) -> App {
         App::new(Dashboard::load(conn).unwrap(), PathBuf::from(":memory:"))
+    }
+
+    /// 수정자 없는 키 이벤트.
+    fn ev(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// 수정자 포함 키 이벤트.
+    fn ev_mod(code: KeyCode, m: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, m)
     }
 
     #[test]
@@ -684,16 +867,32 @@ mod tests {
     fn key_p_enters_plan_input_and_edits() {
         let conn = seeded();
         let mut app = test_app(&conn);
-        assert!(!handle_key(&mut app, KeyCode::Char('p')).unwrap());
+        assert!(!handle_key(&mut app, ev(KeyCode::Char('p'))).unwrap());
         assert!(matches!(app.mode, Mode::Input(InputKind::PlanPrompt)));
-        handle_key(&mut app, KeyCode::Char('a')).unwrap();
-        handle_key(&mut app, KeyCode::Char('b')).unwrap();
+        handle_key(&mut app, ev(KeyCode::Char('a'))).unwrap();
+        handle_key(&mut app, ev(KeyCode::Char('b'))).unwrap();
         assert_eq!(app.input, "ab");
-        handle_key(&mut app, KeyCode::Backspace).unwrap();
+        handle_key(&mut app, ev(KeyCode::Backspace)).unwrap();
         assert_eq!(app.input, "a");
-        handle_key(&mut app, KeyCode::Esc).unwrap();
+        handle_key(&mut app, ev(KeyCode::Esc)).unwrap();
         assert!(matches!(app.mode, Mode::Normal));
         assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline_not_submit() {
+        let conn = seeded();
+        let mut app = test_app(&conn);
+        handle_key(&mut app, ev(KeyCode::Char('p'))).unwrap();
+        handle_key(&mut app, ev(KeyCode::Char('a'))).unwrap();
+        // Shift+Enter → 개행, 제출 아님 (모드 유지)
+        handle_key(&mut app, ev_mod(KeyCode::Enter, KeyModifiers::SHIFT)).unwrap();
+        handle_key(&mut app, ev(KeyCode::Char('b'))).unwrap();
+        assert_eq!(app.input, "a\nb");
+        assert!(matches!(app.mode, Mode::Input(InputKind::PlanPrompt)));
+        // Alt+Enter 도 개행
+        handle_key(&mut app, ev_mod(KeyCode::Enter, KeyModifiers::ALT)).unwrap();
+        assert_eq!(app.input, "a\nb\n");
     }
 
     #[test]
@@ -702,7 +901,7 @@ mod tests {
         let mut app = test_app(&conn);
         app.switch_tab(); // Campaigns
         app.switch_tab(); // Quests
-        handle_key(&mut app, KeyCode::Char('r')).unwrap();
+        handle_key(&mut app, ev(KeyCode::Char('r'))).unwrap();
         match &app.mode {
             Mode::Input(InputKind::ResumeAnswer { quest_id }) => assert!(*quest_id > 0),
             _ => panic!("resume 입력 모드가 아님"),
@@ -713,7 +912,58 @@ mod tests {
     fn key_q_quits() {
         let conn = seeded();
         let mut app = test_app(&conn);
-        assert!(handle_key(&mut app, KeyCode::Char('q')).unwrap());
+        assert!(handle_key(&mut app, ev(KeyCode::Char('q'))).unwrap());
+    }
+
+    #[test]
+    fn hangul_jamo_keys_work_in_normal_mode() {
+        let conn = seeded();
+        // 'ㅂ'(q 자리) → 종료
+        let mut app = test_app(&conn);
+        assert!(handle_key(&mut app, ev(KeyCode::Char('ㅂ'))).unwrap());
+        // 'ㅔ'(p 자리) → 원정 계획 입력 모드
+        let mut app2 = test_app(&conn);
+        handle_key(&mut app2, ev(KeyCode::Char('ㅔ'))).unwrap();
+        assert!(matches!(app2.mode, Mode::Input(InputKind::PlanPrompt)));
+    }
+
+    #[test]
+    fn detail_toggle_open_close() {
+        let conn = seeded();
+        let mut app = test_app(&conn);
+        app.switch_tab(); // Campaigns (seed 에 원정 1건)
+        assert!(app.detail.is_none());
+        // Enter → 상세 열림
+        handle_key(&mut app, ev(KeyCode::Enter)).unwrap();
+        assert!(app.detail.is_some());
+        // Esc → 닫힘 (종료 아님)
+        assert!(!handle_key(&mut app, ev(KeyCode::Esc)).unwrap());
+        assert!(app.detail.is_none());
+        // 'd'(ㅇ 동치) 로도 토글
+        handle_key(&mut app, ev(KeyCode::Char('d'))).unwrap();
+        assert!(app.detail.is_some());
+        handle_key(&mut app, ev(KeyCode::Char('d'))).unwrap();
+        assert!(app.detail.is_none());
+    }
+
+    #[test]
+    fn key_x_runs_selected_campaign() {
+        let conn = seeded();
+        let mut app = test_app(&conn);
+        app.switch_tab(); // Campaigns
+        handle_key(&mut app, ev(KeyCode::Char('x'))).unwrap();
+        assert!(matches!(app.mode, Mode::Running));
+    }
+
+    #[test]
+    fn tab_switch_closes_detail() {
+        let conn = seeded();
+        let mut app = test_app(&conn);
+        app.switch_tab(); // Campaigns
+        handle_key(&mut app, ev(KeyCode::Enter)).unwrap();
+        assert!(app.detail.is_some());
+        handle_key(&mut app, ev(KeyCode::Tab)).unwrap();
+        assert!(app.detail.is_none());
     }
 
     #[test]
@@ -722,8 +972,8 @@ mod tests {
         let mut app = test_app(&conn);
         app.mode = Mode::Running;
         // Running 중엔 q도 종료 안 됨, 탭도 안 바뀜.
-        assert!(!handle_key(&mut app, KeyCode::Char('q')).unwrap());
-        assert!(!handle_key(&mut app, KeyCode::Tab).unwrap());
+        assert!(!handle_key(&mut app, ev(KeyCode::Char('q'))).unwrap());
+        assert!(!handle_key(&mut app, ev(KeyCode::Tab)).unwrap());
         assert_eq!(app.tab, Tab::Projects);
     }
 
