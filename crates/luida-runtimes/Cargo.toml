@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 luida-core = { path = "../luida-core" }
 anyhow.workspace = true
+serde_json.workspace = true

@@ -8,6 +8,9 @@
 //!  - 종료 시 child kill+wait 보장 → 좀비/누수 방지 (review M7)
 //!  - cwd는 spawn 전 디렉터리 검증 (review M6)
 
+mod fake;
+pub use fake::{fake_runtime_for, FakeRuntime};
+
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};

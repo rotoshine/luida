@@ -11,11 +11,49 @@ use luida_core::{
 use luida_brain::{ingest_project, reflect, report_campaign, MemoryVault};
 use luida_planner::{plan_campaign, run_campaign};
 use luida_runtimes::runtime_for_kind;
-use luida_sidecar::{resume_quest, triage_escalation, WorktrunkProvider};
+use luida_runtimes::fake_runtime_for;
+use luida_sidecar::{resume_quest, triage_escalation, Worktree, WorktreeProvider, WorktrunkProvider};
 
-/// 실제 런타임 factory — resolved.kind/command → 로컬 CLI(claude/codex) 런타임.
-fn cli_factory(r: &ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
-    runtime_for_kind(&r.kind, r.command.as_deref())
+/// 데모 모드 여부 — LUIDA_FAKE=1이면 외부 LLM/repo 없이 결정적 fake 런타임 사용.
+fn is_fake() -> bool {
+    std::env::var("LUIDA_FAKE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// 런타임 factory — fake면 결정적 데모 런타임, 아니면 로컬 CLI(claude/codex).
+fn make_factory() -> impl Fn(&ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
+    let fake = is_fake();
+    move |r: &ResolvedAgent| {
+        if fake {
+            Ok(fake_runtime_for(&r.action))
+        } else {
+            runtime_for_kind(&r.kind, r.command.as_deref())
+        }
+    }
+}
+
+/// 데모용 worktree provider — wt/git 없이 temp 디렉터리 생성.
+struct TempWorktree;
+impl WorktreeProvider for TempWorktree {
+    fn create(&self, _repo: &std::path::Path, codename: &str) -> Result<Worktree> {
+        let safe: String = codename.chars().map(|c| if c == '/' { '-' } else { c }).collect();
+        let dir = std::env::temp_dir().join("luida-fake-wt").join(safe);
+        std::fs::create_dir_all(&dir)?;
+        Ok(Worktree {
+            branch: codename.to_string(),
+            path: dir,
+        })
+    }
+}
+
+/// 현재 모드에 맞는 worktree provider.
+fn make_worktree() -> Box<dyn WorktreeProvider> {
+    if is_fake() {
+        Box::new(TempWorktree)
+    } else {
+        Box::new(WorktrunkProvider::default())
+    }
 }
 
 /// db 열고 마이그레이션 + agents.json 로드.
@@ -246,7 +284,7 @@ fn main() -> Result<()> {
                 }
                 ProjectAction::Ingest { name } => {
                     let vault = MemoryVault::default_vault();
-                    let path = ingest_project(&mut conn, &cfg, &name, &vault, cli_factory)?;
+                    let path = ingest_project(&mut conn, &cfg, &name, &vault, make_factory())?;
                     println!("📖 모험지 맥락 요약: {name} → {}", path.display());
                 }
             }
@@ -255,7 +293,7 @@ fn main() -> Result<()> {
             let (mut conn, cfg) = open_ready(&db_path)?;
             match action {
                 CampaignAction::Plan { prompt } => {
-                    let cid = plan_campaign(&mut conn, &cfg, &prompt, cli_factory)?;
+                    let cid = plan_campaign(&mut conn, &cfg, &prompt, make_factory())?;
                     let quests = QuestRepo::new(&conn).list_for_campaign(cid)?;
                     println!("🗺  원정 #{cid} 계획 완료 — quest {}건:", quests.len());
                     for q in quests {
@@ -264,8 +302,8 @@ fn main() -> Result<()> {
                     println!("   실행: `luida campaign run {cid}`");
                 }
                 CampaignAction::Run { id } => {
-                    let worktree = WorktrunkProvider::default();
-                    let report = run_campaign(&mut conn, &cfg, id, &worktree, cli_factory)?;
+                    let report =
+                        run_campaign(&mut conn, &cfg, id, make_worktree().as_ref(), make_factory())?;
                     println!(
                         "⚔  원정 #{id} 실행 — 완료 {} / 대기 {} / 실패 {}",
                         report.completed.len(),
@@ -280,7 +318,7 @@ fn main() -> Result<()> {
                 }
                 CampaignAction::Report { id } => {
                     let vault = MemoryVault::default_vault();
-                    let path = report_campaign(&mut conn, &cfg, id, &vault, cli_factory)?;
+                    let path = report_campaign(&mut conn, &cfg, id, &vault, make_factory())?;
                     println!("📜 모험의 서에 기록: {}", path.display());
                 }
                 CampaignAction::List => {
@@ -300,11 +338,11 @@ fn main() -> Result<()> {
             let (mut conn, cfg) = open_ready(&db_path)?;
             match action {
                 QuestAction::Resume { id, answer } => {
-                    let out = resume_quest(&mut conn, &cfg, id, &answer, cli_factory)?;
+                    let out = resume_quest(&mut conn, &cfg, id, &answer, make_factory())?;
                     println!("⚔  모험 q{id} 재개 → {out:?}");
                 }
                 QuestAction::Triage { id } => {
-                    let d = triage_escalation(&mut conn, &cfg, id, cli_factory)?;
+                    let d = triage_escalation(&mut conn, &cfg, id, make_factory())?;
                     println!(
                         "🔎 q{id} triage — 사용자 필요: {} / 이유: {}",
                         if d.ask_user { "예" } else { "아니오(자동 해소 가능)" },
@@ -338,7 +376,7 @@ fn main() -> Result<()> {
         Cmd::Reflect { since_hours } => {
             let (mut conn, cfg) = open_ready(&db_path)?;
             let since_ms = luida_core::now_ms() - since_hours.max(0) * 3_600_000;
-            let report = reflect(&mut conn, &cfg, since_ms, cli_factory)?;
+            let report = reflect(&mut conn, &cfg, since_ms, make_factory())?;
             println!(
                 "🧠 학습 완료 — 관계 제안 {}건 저장(비활성) / {}건 스킵 / 패턴 {}건",
                 report.proposals_inserted,
