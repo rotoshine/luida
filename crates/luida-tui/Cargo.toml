@@ -10,6 +10,7 @@ luida-core = { path = "../luida-core" }
 luida-planner = { path = "../luida-planner" }
 luida-sidecar = { path = "../luida-sidecar" }
 luida-runtimes = { path = "../luida-runtimes" }
+luida-brain = { path = "../luida-brain" }
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true

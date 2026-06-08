@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use luida_core::agents::default_agents_path;
 use luida_core::{
-    machine_id, open_ready, resolve, resume_bundle, runtime_available, suspend_campaign,
-    AgentsConfig, CampaignRepo, HandoffBundle, ProjectRepo, QuestRepo, RelationshipRepo,
-    default_db_path, migrate, open_db,
+    machine_id, open_ready, reconcile_interrupted_quests, resolve, resume_bundle,
+    runtime_available, suspend_campaign, AgentsConfig, CampaignRepo, HandoffBundle, ProjectRepo,
+    QuestRepo, RelationshipRepo, default_db_path, migrate, open_db,
 };
 use luida_brain::{ingest_project, reflect, report_campaign, MemoryVault};
 use luida_planner::{plan_campaign, run_campaign};
@@ -426,6 +426,9 @@ fn main() -> Result<()> {
             ServerAction::Start { port } => {
                 let mut conn = open_db(&db_path)?;
                 migrate(&mut conn)?;
+                // 서버는 open_ready 를 거치지 않으므로 여기서 재시작 재조정 (이전 서버 실행이 강제
+                // 종료돼 'running'으로 남은 이 머신의 모험을 중단=이어받기 가능 으로 되돌림).
+                let _ = reconcile_interrupted_quests(&conn);
                 let rt = tokio::runtime::Runtime::new()?;
                 rt.block_on(async move { luida_server::serve(port, conn, db_path).await })?;
             }

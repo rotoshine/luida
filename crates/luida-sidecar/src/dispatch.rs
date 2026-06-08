@@ -21,7 +21,9 @@ use luida_core::{
     resolve, AgentsConfig, Connection, EventRepo, NewEvent, ProjectRepo, QuestRepo,
 };
 
-use crate::worktree::WorktreeProvider;
+use luida_core::machine_id;
+
+use crate::worktree::{Worktree, WorktreeProvider};
 
 /// worker brief에 주입하는 escalation 마커 규약 (headless 신호 수단, spec §5.6).
 pub const ESCALATION_PROTOCOL: &str = "\n\n---\n[Luida 규약] 판단이 필요하면 즉시 멈추고 아래 마커로 질문하라:\n<<LUIDA_ASK category=<system_error|ambiguous_spec|design_mismatch|dangerous_op>>>\n사용자에게 물을 질문\n<<END>>\n다른 경우엔 작업을 끝까지 수행하라.\n";
@@ -35,6 +37,8 @@ pub enum DispatchOutcome {
     Completed { summary: Option<String> },
     NeedsInput { category: String, question: String },
     Failed { summary: Option<String> },
+    /// 사용자 취소(TUI 종료)로 중단됨 — quest 는 'pending'(이어받기 가능)으로 되돌아간다.
+    Interrupted,
 }
 
 /// quest 하나를 새로 실행한다(신규 worktree + 새 세션).
@@ -61,24 +65,43 @@ where
 
     let resolved = resolve(cfg, "quest.execute", Some(&quest.project))?;
 
-    // worktree provisioning (status 변경 전 — 실패 시 quest는 pending 유지)
-    let codename = quest
-        .branch
-        .clone()
-        .unwrap_or_else(|| format!("luida/q{quest_id}"));
-    let wt = worktree
-        .create(Path::new(&project.repo_path), &codename)
-        .context("worktree 생성 실패")?;
+    // 중단 후 재개(worktree_path 가 **실재**)면 기존 worktree 재사용 + --resume 으로 직전 세션을
+    // 이어받는다. 신규이거나 기존 worktree 가 사라졌으면 새로 만들고 처음부터(resume=false).
+    let reuse = quest
+        .worktree_path
+        .as_deref()
+        .filter(|p| Path::new(p).is_dir());
+    let (wt, is_resume) = match reuse {
+        Some(existing) => (
+            Worktree {
+                branch: quest.branch.clone().unwrap_or_else(|| format!("luida/q{quest_id}")),
+                path: PathBuf::from(existing),
+            },
+            true,
+        ),
+        None => {
+            let codename = quest
+                .branch
+                .clone()
+                .unwrap_or_else(|| format!("luida/q{quest_id}"));
+            let wt = worktree
+                .create(Path::new(&project.repo_path), &codename)
+                .context("worktree 생성 실패")?;
+            (wt, false)
+        }
+    };
 
     let campaign_id = quest.campaign_id;
     let actor = quest.project.clone();
+    let started_at = luida_core::process_start_time(std::process::id());
 
-    // 시작: worktree + running + dispatched 이벤트 (원자)
+    // 시작: worktree + running + runner 리스(고아 재조정용) + dispatched 이벤트 (원자)
     {
         let tx = conn.transaction()?;
         {
             let qr = QuestRepo::new(&tx);
             qr.set_worktree(quest_id, &wt.branch, &wt.path.to_string_lossy())?;
+            qr.set_runner(quest_id, std::process::id() as i64, &machine_id(), started_at)?;
             qr.set_status(quest_id, "running")?;
         }
         EventRepo::new(&tx).record(NewEvent {
@@ -91,6 +114,7 @@ where
                 "model": resolved.model,
                 "mode": resolved.mode,
                 "branch": wt.branch,
+                "resume": is_resume,
             })
             .to_string(),
         })?;
@@ -102,7 +126,7 @@ where
         cwd: Some(wt.path),
         session_id: Some(format!("luida-q{quest_id}")),
         system_context: project.context_path.clone(),
-        resume: false,
+        resume: is_resume,
     };
 
     run_worker(conn, quest_id, campaign_id, &actor, &resolved, &inv, runtime_factory)
@@ -136,7 +160,12 @@ where
 
     {
         let tx = conn.transaction()?;
-        QuestRepo::new(&tx).set_status(quest_id, "running")?;
+        {
+            let qr = QuestRepo::new(&tx);
+            let started_at = luida_core::process_start_time(std::process::id());
+            qr.set_runner(quest_id, std::process::id() as i64, &machine_id(), started_at)?;
+            qr.set_status(quest_id, "running")?;
+        }
         EventRepo::new(&tx).record(NewEvent {
             campaign_id,
             quest_id: Some(quest_id),
@@ -215,6 +244,21 @@ fn settle_outcome(
     actor: &str,
     outcome: AgentOutcome,
 ) -> Result<DispatchOutcome> {
+    // 사용자 취소(TUI 종료)가 최우선 — 'failed'가 아니라 'pending'(이어받기 가능)으로 되돌린다.
+    if outcome.cancelled {
+        let tx = conn.transaction()?;
+        QuestRepo::new(&tx).set_status(quest_id, "pending")?;
+        EventRepo::new(&tx).record(NewEvent {
+            campaign_id,
+            quest_id: Some(quest_id),
+            actor,
+            kind: "quest_interrupted",
+            payload: &json!({ "reason": "user_cancelled" }).to_string(),
+        })?;
+        tx.commit()?;
+        return Ok(DispatchOutcome::Interrupted);
+    }
+
     if let Some((category, question)) = outcome.escalation {
         let tx = conn.transaction()?;
         QuestRepo::new(&tx).set_status(quest_id, "needs_input")?;
@@ -402,6 +446,22 @@ mod tests {
         |_| bail!("런타임 생성 실패(테스트)")
     }
 
+    /// 사용자 취소(TUI 종료)를 모사 — cancelled outcome 을 낸다.
+    struct CancelledRuntime;
+    impl AgentRuntime for CancelledRuntime {
+        fn run(
+            &self,
+            _model: &str,
+            _inv: &AgentInvocation,
+            _on_event: &mut dyn FnMut(&AgentEvent),
+        ) -> Result<AgentOutcome> {
+            Ok(AgentOutcome { cancelled: true, ..Default::default() })
+        }
+    }
+    fn cancelled_factory() -> impl Fn(&ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
+        |_| Ok(Box::new(CancelledRuntime) as Box<dyn AgentRuntime>)
+    }
+
     #[test]
     fn dispatch_success_completes_quest() {
         let mut conn = setup();
@@ -457,6 +517,99 @@ mod tests {
         let out = dispatch_quest(&mut conn, &cfg(), id, &FakeWorktree, factory(script)).unwrap();
         assert!(matches!(out, DispatchOutcome::Failed { .. }));
         assert_eq!(QuestRepo::new(&conn).get(id).unwrap().unwrap().status, "failed");
+    }
+
+    #[test]
+    fn cancelled_sets_pending_and_records_runner_lease() {
+        // 사용자 취소 → 'failed'가 아니라 'pending'(이어받기 가능) + quest_interrupted 이벤트.
+        // 또한 dispatch 시작 시 runner 리스(pid)가 기록됐는지 확인(재조정 입력).
+        let mut conn = setup();
+        let id = new_quest(&conn);
+        let out =
+            dispatch_quest(&mut conn, &cfg(), id, &FakeWorktree, cancelled_factory()).unwrap();
+        assert_eq!(out, DispatchOutcome::Interrupted);
+        let q = QuestRepo::new(&conn).get(id).unwrap().unwrap();
+        assert_eq!(q.status, "pending"); // 이어받기 가능
+        assert!(q.worktree_path.is_some()); // worktree 유지 → 재개 시 재사용
+        let evs = EventRepo::new(&conn).recent_since(0, 50).unwrap();
+        assert!(evs.iter().any(|e| e.kind == "quest_interrupted"));
+        // dispatch 가 runner_pid 를 기록했는지(이 프로세스).
+        let pid: i64 = conn
+            .query_row("SELECT runner_pid FROM quests WHERE id = ?1", [id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pid, std::process::id() as i64);
+    }
+
+    /// 실재하는 임시 worktree 디렉터리.
+    fn real_worktree_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("luida-wt-{}-{tag}-{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn redispatch_reuses_existing_worktree_and_resumes() {
+        // 중단 후 재개 모사: worktree_path 가 **실재**하는 pending quest 를 다시 dispatch.
+        // → 새 worktree 를 만들지 않고(FailWorktree 여도 성공) --resume 으로 이어받는다.
+        let mut conn = setup();
+        let id = new_quest(&conn);
+        let wt = real_worktree_dir("reuse");
+        QuestRepo::new(&conn)
+            .set_worktree(id, "luida/q1", &wt.to_string_lossy())
+            .unwrap();
+        let script = vec![AgentEvent::Result {
+            success: true,
+            summary: Some("이어서 완료".into()),
+        }];
+        // FailWorktree.create 가 호출되면 실패 → 재사용 경로라야 성공한다.
+        let out = dispatch_quest(&mut conn, &cfg(), id, &FailWorktree, factory(script)).unwrap();
+        assert!(matches!(out, DispatchOutcome::Completed { .. }), "재사용 실패: {out:?}");
+        let evs = EventRepo::new(&conn).recent_since(0, 50).unwrap();
+        let disp = evs.iter().find(|e| e.kind == "quest_dispatched").unwrap();
+        assert!(disp.payload.contains("\"resume\":true"), "resume=true 여야: {}", disp.payload);
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn redispatch_recreates_when_worktree_gone() {
+        // worktree_path 가 기록돼 있지만 디렉터리가 사라진 경우 → 'failed' 가 아니라
+        // 새 worktree 를 만들어 처음부터(resume=false) 재시도한다.
+        let mut conn = setup();
+        let id = new_quest(&conn);
+        QuestRepo::new(&conn)
+            .set_worktree(id, "luida/q1", "/nonexistent/luida-gone-xyz")
+            .unwrap();
+        let script = vec![AgentEvent::Result { success: true, summary: Some("처음부터".into()) }];
+        // FakeWorktree.create 가 호출돼야(=새로 생성) 성공한다.
+        let out = dispatch_quest(&mut conn, &cfg(), id, &FakeWorktree, factory(script)).unwrap();
+        assert!(matches!(out, DispatchOutcome::Completed { .. }), "재생성 실패: {out:?}");
+        let evs = EventRepo::new(&conn).recent_since(0, 50).unwrap();
+        let disp = evs.iter().find(|e| e.kind == "quest_dispatched").unwrap();
+        assert!(disp.payload.contains("\"resume\":false"), "resume=false 여야: {}", disp.payload);
+    }
+
+    #[test]
+    fn triage_cancelled_returns_interrupted_and_pending() {
+        // triage 중 사용자 취소 → 하드 에러 아님. quest 를 pending 으로 되돌리고 interrupted 신호.
+        use crate::escalation::triage_escalation;
+        let mut conn = setup();
+        let id = new_quest(&conn);
+        // needs_input 상태 + escalation 이벤트 준비.
+        let script = vec![AgentEvent::Escalation {
+            category: "ambiguous_spec".into(),
+            message: "어느 쪽?".into(),
+        }];
+        dispatch_quest(&mut conn, &cfg(), id, &FakeWorktree, factory(script)).unwrap();
+        assert_eq!(QuestRepo::new(&conn).get(id).unwrap().unwrap().status, "needs_input");
+        // triage 가 cancelled outcome → interrupted.
+        let decision = triage_escalation(&mut conn, &cfg(), id, cancelled_factory()).unwrap();
+        assert!(decision.interrupted);
+        assert_eq!(QuestRepo::new(&conn).get(id).unwrap().unwrap().status, "pending");
+        let evs = EventRepo::new(&conn).recent_since(0, 50).unwrap();
+        assert!(evs.iter().any(|e| e.kind == "quest_interrupted"));
     }
 
     #[test]

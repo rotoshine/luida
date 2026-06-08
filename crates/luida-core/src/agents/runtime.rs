@@ -39,6 +39,8 @@ pub struct AgentOutcome {
     pub saw_result: bool,
     pub summary: Option<String>,
     pub escalation: Option<(String, String)>,
+    /// true면 사용자 취소(TUI 종료)로 중단됨 → 'failed'가 아닌 '중단'으로 처리.
+    pub cancelled: bool,
 }
 
 /// Agent 런타임 — 콜백 기반 스트리밍 (async trait 회피).

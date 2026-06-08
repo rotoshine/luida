@@ -23,6 +23,8 @@ pub struct CampaignRunReport {
     pub completed: Vec<i64>,
     pub needs_input: Vec<i64>,
     pub failed: Vec<i64>,
+    /// 사용자 취소(TUI 종료)로 중단된 quest — 'pending'으로 되돌아가 재개 가능.
+    pub interrupted: Vec<i64>,
     /// 관계 트리거로 자동 생성·실행된 후속 quest 수.
     pub triggered: usize,
     /// 원정의 모든 quest가 completed인가 (report 단계 진입 조건).
@@ -146,7 +148,8 @@ where
     CampaignRepo::new(conn).set_status(campaign_id, "running")?;
 
     let mut report = CampaignRunReport::default();
-    loop {
+    let mut interrupted = false;
+    'outer: loop {
         let ready = QuestRepo::new(conn).ready_in_campaign(campaign_id)?;
         if ready.is_empty() {
             break;
@@ -157,6 +160,12 @@ where
             let mut attempts = 0u32;
             while matches!(outcome, DispatchOutcome::NeedsInput { .. }) {
                 let decision = triage_escalation(conn, cfg, q.id, &runtime_factory)?;
+                // triage 중 사용자 취소 → 즉시 중단(quest 는 이미 pending 으로 복귀됨).
+                if decision.interrupted {
+                    report.interrupted.push(q.id);
+                    interrupted = true;
+                    break 'outer;
+                }
                 if decision.ask_user || attempts >= MAX_AUTO_RESUME {
                     break;
                 }
@@ -180,6 +189,12 @@ where
                     report.needs_input.push(q.id);
                 }
                 DispatchOutcome::Failed { .. } => report.failed.push(q.id),
+                DispatchOutcome::Interrupted => {
+                    // 사용자 취소 → 더 이상 디스패치하지 않고 즉시 멈춘다(원정은 재개 가능).
+                    report.interrupted.push(q.id);
+                    interrupted = true;
+                    break 'outer;
+                }
             }
         }
     }
@@ -187,7 +202,10 @@ where
     let all = QuestRepo::new(conn).list_for_campaign(campaign_id)?;
     report.all_completed = !all.is_empty() && all.iter().all(|q| q.status == "completed");
 
-    let status = if !report.needs_input.is_empty() {
+    let status = if interrupted {
+        // 중단 — 원정을 active(running)로 유지해 재개(x) 가능하게.
+        "running"
+    } else if !report.needs_input.is_empty() {
         "needs_input"
     } else if report.all_completed {
         // 완료 마감(completed)은 campaign.report 단계(Phase D)에서.
@@ -220,7 +238,7 @@ quest DAG로 분해하세요.\n\n등록된 모험지: {}\n\n사용자 요청:\n{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use luida_core::agents::{AgentEvent, ScriptedRuntime};
+    use luida_core::agents::{AgentEvent, AgentInvocation, AgentOutcome, ScriptedRuntime};
     use luida_core::{migrate, open_memory};
 
     fn cfg() -> AgentsConfig {
@@ -265,6 +283,36 @@ mod tests {
                 success: true,
                 summary: Some("done".into()),
             }])) as Box<dyn AgentRuntime>)
+        }
+    }
+
+    /// 사용자 취소(TUI 종료)를 모사 — cancelled outcome.
+    struct CancelledRuntime;
+    impl AgentRuntime for CancelledRuntime {
+        fn run(
+            &self,
+            _m: &str,
+            _i: &AgentInvocation,
+            _o: &mut dyn FnMut(&AgentEvent),
+        ) -> Result<AgentOutcome> {
+            Ok(AgentOutcome { cancelled: true, ..Default::default() })
+        }
+    }
+    fn cancelled_factory() -> impl Fn(&ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
+        |_| Ok(Box::new(CancelledRuntime) as Box<dyn AgentRuntime>)
+    }
+
+    /// quest.execute 는 escalation, escalation.triage 는 취소 → triage 중 취소 경로.
+    fn escalate_then_cancel_factory() -> impl Fn(&ResolvedAgent) -> Result<Box<dyn AgentRuntime>> {
+        |r| {
+            if r.action == "escalation.triage" {
+                Ok(Box::new(CancelledRuntime) as Box<dyn AgentRuntime>)
+            } else {
+                Ok(Box::new(ScriptedRuntime::new(vec![AgentEvent::Escalation {
+                    category: "ambiguous_spec".into(),
+                    message: "?".into(),
+                }])) as Box<dyn AgentRuntime>)
+            }
         }
     }
 
@@ -315,6 +363,45 @@ mod tests {
         let mut conn = open_memory().unwrap();
         migrate(&mut conn).unwrap();
         assert!(plan_campaign(&mut conn, &cfg(), "p", result_factory(PLAN)).is_err());
+    }
+
+    #[test]
+    fn run_campaign_stops_on_interrupt_and_stays_resumable() {
+        let mut conn = setup();
+        let cid = plan_campaign(&mut conn, &cfg(), "p", result_factory(PLAN)).unwrap();
+        let report =
+            run_campaign(&mut conn, &cfg(), cid, &FakeWorktree, cancelled_factory()).unwrap();
+        // 첫 quest 가 취소 → 더 이상 디스패치 안 함.
+        assert_eq!(report.interrupted.len(), 1);
+        assert!(report.completed.is_empty());
+        assert!(!report.all_completed);
+        // 중단 quest 는 pending(이어받기 가능)으로 복귀.
+        let quests = QuestRepo::new(&conn).list_for_campaign(cid).unwrap();
+        assert!(quests.iter().all(|q| q.status == "pending"));
+        // 원정은 active(running) 유지 → x 로 재개 가능.
+        assert_eq!(
+            CampaignRepo::new(&conn).get(cid).unwrap().unwrap().status,
+            "running"
+        );
+    }
+
+    #[test]
+    fn run_campaign_stops_on_interrupt_during_triage() {
+        // dispatch → NeedsInput → triage 중 취소 → Interrupted(하드 에러 아님). quest 는 pending.
+        let mut conn = setup();
+        let cid = plan_campaign(&mut conn, &cfg(), "p", result_factory(PLAN)).unwrap();
+        let report =
+            run_campaign(&mut conn, &cfg(), cid, &FakeWorktree, escalate_then_cancel_factory())
+                .unwrap();
+        assert_eq!(report.interrupted.len(), 1);
+        assert!(report.failed.is_empty(), "취소가 실패로 오분류되면 안 됨");
+        let quests = QuestRepo::new(&conn).list_for_campaign(cid).unwrap();
+        // 첫 quest 는 중단되어 pending 복귀.
+        assert!(quests.iter().any(|q| q.status == "pending"));
+        assert_eq!(
+            CampaignRepo::new(&conn).get(cid).unwrap().unwrap().status,
+            "running"
+        );
     }
 
     #[test]

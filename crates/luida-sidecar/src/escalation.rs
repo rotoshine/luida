@@ -20,6 +20,8 @@ pub struct TriageDecision {
     pub ask_user: bool,
     pub auto_answer: Option<String>,
     pub reason: String,
+    /// true면 triage 중 사용자 취소(TUI 종료) — quest 는 'pending'(이어받기 가능)으로 되돌아갔다.
+    pub interrupted: bool,
 }
 
 /// LLM이 내는 triage JSON.
@@ -58,6 +60,26 @@ where
     };
     let runtime = runtime_factory(&resolved).context("triage 런타임 생성 실패")?;
     let outcome = runtime.run(&resolved.model, &inv, &mut |_| {})?;
+    // 사용자 취소(TUI 종료) → 하드 에러가 아니라 '중단'으로 처리. quest 를 needs_input 에서
+    // pending(이어받기 가능)으로 되돌리고 상위(run_campaign)에 Interrupted 신호를 준다.
+    if outcome.cancelled {
+        let tx = conn.transaction()?;
+        QuestRepo::new(&tx).set_status(quest_id, "pending")?;
+        EventRepo::new(&tx).record(NewEvent {
+            campaign_id: quest.campaign_id,
+            quest_id: Some(quest_id),
+            actor: "luida",
+            kind: "quest_interrupted",
+            payload: &json!({ "reason": "user_cancelled", "phase": "triage" }).to_string(),
+        })?;
+        tx.commit()?;
+        return Ok(TriageDecision {
+            ask_user: false,
+            auto_answer: None,
+            reason: "사용자 취소".to_string(),
+            interrupted: true,
+        });
+    }
     let raw = outcome
         .summary
         .context("triage가 결정(JSON)을 반환하지 않음")?;
@@ -129,6 +151,7 @@ fn parse_decision(raw: &str) -> Result<TriageDecision> {
         ask_user: rd.ask_user,
         auto_answer: rd.auto_answer.filter(|s| !s.trim().is_empty()),
         reason: rd.reason,
+        interrupted: false,
     })
 }
 

@@ -3,11 +3,13 @@
 //! 행위(action)별로 어떤 런타임(claude/codex/...)·모델·실행모드를 쓸지 결정한다.
 //! 우선순위: projectOverrides > actions > defaults. tier 미지정 시 런타임의 tier별 기본 모델.
 
+mod cancel;
 mod config;
 mod resolver;
 mod runtime;
 mod tokenjuice;
 
+pub use cancel::{pid_alive, process_start_time, runner_alive, CancelToken};
 pub use config::{
     default_agents_path, ActionConfig, AgentsConfig, Defaults, RuntimeDef, RuntimeModels,
 };

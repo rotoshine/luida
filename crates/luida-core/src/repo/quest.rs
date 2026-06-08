@@ -4,6 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::db::now_ms;
 use crate::models::Quest;
 
+/// running quest 의 runner 리스 한 행: (quest_id, runner_pid, runner_machine, runner_started_at).
+pub type QuestRunner = (i64, Option<i64>, Option<String>, Option<i64>);
+
 /// 새 quest 생성 입력.
 pub struct NewQuest<'a> {
     pub campaign_id: Option<i64>,
@@ -129,6 +132,44 @@ impl<'a> QuestRepo<'a> {
             params![status, now_ms(), id],
         )?;
         Ok(())
+    }
+
+    /// running 으로 돌리는 프로세스(runner) 기록 — 재시작 시 고아/중단 재조정용.
+    /// `started_at` 은 runner 프로세스 시작 시각(epoch ms) — PID 재사용 구분용.
+    pub fn set_runner(
+        &self,
+        id: i64,
+        pid: i64,
+        machine: &str,
+        started_at: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE quests SET runner_pid = ?1, runner_machine = ?2, runner_started_at = ?3,
+                              updated_at = ?4 WHERE id = ?5",
+            params![pid, machine, started_at, now_ms(), id],
+        )?;
+        Ok(())
+    }
+
+    /// running/reviewing 상태 quest 의 (id, pid, machine, started_at) 목록. 재조정 입력.
+    pub fn list_running_runners(&self) -> Result<Vec<QuestRunner>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, runner_pid, runner_machine, runner_started_at FROM quests
+             WHERE status IN ('running', 'reviewing')",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 
     pub fn set_progress(&self, id: i64, progress: Option<&str>) -> Result<()> {
