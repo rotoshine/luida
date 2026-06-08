@@ -9,7 +9,7 @@ mod resolver;
 mod runtime;
 mod tokenjuice;
 
-pub use cancel::{pid_alive, process_start_time, runner_alive, CancelToken};
+pub use cancel::{kill_process_group, pid_alive, process_start_time, runner_alive, CancelToken};
 pub use config::{
     default_agents_path, ActionConfig, AgentsConfig, Defaults, RuntimeDef, RuntimeModels,
 };

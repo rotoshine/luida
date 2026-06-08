@@ -29,7 +29,7 @@ impl CancelToken {
         self.cancelled.store(true, Ordering::SeqCst);
         let pid = self.child_pid.load(Ordering::SeqCst);
         if pid != 0 {
-            kill_pid(pid);
+            kill_process_group(pid);
         }
     }
 
@@ -42,7 +42,7 @@ impl CancelToken {
     pub fn register_child(&self, pid: u32) {
         self.child_pid.store(pid, Ordering::SeqCst);
         if self.is_cancelled() {
-            kill_pid(pid);
+            kill_process_group(pid);
         }
     }
 
@@ -57,11 +57,21 @@ impl CancelToken {
     }
 }
 
-/// PID 에 SIGKILL (unix). 비-unix 는 no-op.
-fn kill_pid(pid: u32) {
+/// PID(또는 그 프로세스 그룹)에 SIGKILL (unix). 비-unix 는 no-op.
+///
+/// cancel 경로의 자식은 `process_group(0)` 으로 새 프로세스 그룹의 리더가 되도록 spawn 되므로
+/// (pgid == pid), 음수 pid 로 그룹 전체에 SIGKILL 을 보내 자식이 띄운 손자(MCP·툴 서브프로세스)
+/// 까지 한 번에 정리한다 → 고아 프로세스 방지. 그룹 kill 이 닿지 않아도 직접 자식만은 확실히
+/// 죽도록 단일 kill 도 함께 보낸다. pid<=1(0=자기 그룹, 1=init)은 안전을 위해 보호한다.
+pub fn kill_process_group(pid: u32) {
+    if pid <= 1 {
+        return;
+    }
     #[cfg(unix)]
     unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        let p = pid as libc::pid_t;
+        libc::kill(-p, libc::SIGKILL); // 그룹 전체(손자 포함)
+        libc::kill(p, libc::SIGKILL); // 그룹 리더가 아니어도 직접 자식만은 확실히
     }
     #[cfg(not(unix))]
     let _ = pid;
@@ -172,6 +182,14 @@ mod tests {
         t.register_child(0); // 0 은 무시
         t.clear_child();
         assert!(!t.is_cancelled());
+    }
+
+    #[test]
+    fn kill_process_group_guards_low_pids() {
+        // pid<=1 은 no-op 이어야 한다. 만약 kill(-0)을 호출했다면 호출자(테스트 러너)의
+        // 프로세스 그룹 전체가 SIGKILL 돼 이 테스트가 죽는다 → 통과 자체가 가드 동작 증명.
+        kill_process_group(0);
+        kill_process_group(1);
     }
 
     #[test]
