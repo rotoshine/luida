@@ -60,20 +60,27 @@ impl<'a> EventRepo<'a> {
         )
     }
 
-    /// campaign의 events 타임라인 (오래된 순). TUI 상세 뷰용.
+    /// campaign의 events 타임라인 — 최신 `limit`건을 오래된 순으로. TUI 상세 뷰용.
+    /// LIMIT 은 반드시 최신 쪽(DESC)에 걸어야 200건 초과 장시간 원정에서도 tail-follow 가
+    /// 최신 이벤트를 따라간다. 안쪽에서 최신 N건을 추린 뒤 바깥에서 ASC 로 되돌려 표시 순서 유지.
     pub fn for_campaign(&self, campaign_id: i64, limit: i64) -> Result<Vec<Event>> {
         self.query_many(
-            "SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at
-             FROM events WHERE campaign_id = ?1 ORDER BY occurred_at ASC, id ASC LIMIT ?2",
+            "SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at FROM (
+                 SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at
+                 FROM events WHERE campaign_id = ?1 ORDER BY occurred_at DESC, id DESC LIMIT ?2
+             ) ORDER BY occurred_at ASC, id ASC",
             params![campaign_id, limit],
         )
     }
 
-    /// quest의 events 타임라인 (오래된 순). TUI 상세 뷰용.
+    /// quest의 events 타임라인 — 최신 `limit`건을 오래된 순으로. TUI 상세 뷰용.
+    /// (for_campaign 과 동일하게 LIMIT 을 최신 쪽에 걸어 tail 정확성을 보장.)
     pub fn for_quest(&self, quest_id: i64, limit: i64) -> Result<Vec<Event>> {
         self.query_many(
-            "SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at
-             FROM events WHERE quest_id = ?1 ORDER BY occurred_at ASC, id ASC LIMIT ?2",
+            "SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at FROM (
+                 SELECT id, campaign_id, quest_id, actor, kind, payload, occurred_at
+                 FROM events WHERE quest_id = ?1 ORDER BY occurred_at DESC, id DESC LIMIT ?2
+             ) ORDER BY occurred_at ASC, id ASC",
             params![quest_id, limit],
         )
     }
@@ -188,6 +195,35 @@ mod tests {
         let q = repo.for_quest(qid, 100).unwrap();
         assert_eq!(q.len(), 2);
         assert!(q.iter().all(|e| e.quest_id == Some(qid)));
+    }
+
+    #[test]
+    fn for_campaign_returns_latest_window_in_ascending_order() {
+        // LIMIT 초과(250건 > 200) 시 '최초'가 아닌 '최신' 200건을 오래된 순으로 돌려줘야
+        // TUI tail-follow 가 장시간 원정에서도 최신 이벤트를 따라간다(회귀 방지).
+        use crate::repo::{CampaignRepo, NewCampaign, ProjectRepo};
+        let conn = setup();
+        ProjectRepo::new(&conn).add("agora", "/a", "main", None).unwrap();
+        let cid = CampaignRepo::new(&conn)
+            .insert(NewCampaign { title: "t", prompt: "p", plan_json: "{}", status: "running" })
+            .unwrap();
+        let repo = EventRepo::new(&conn);
+        for i in 0..250 {
+            let payload = format!("{{\"n\":{i}}}");
+            repo.record(NewEvent {
+                campaign_id: Some(cid),
+                quest_id: None,
+                actor: "x",
+                kind: "tick",
+                payload: &payload,
+            })
+            .unwrap();
+        }
+        let evs = repo.for_campaign(cid, 200).unwrap();
+        assert_eq!(evs.len(), 200, "limit 만큼만");
+        // 윈도우는 최신 200건(n=50..=249), 표시는 오래된 순.
+        assert!(evs[0].payload.contains("\"n\":50}"), "첫 원소=윈도우 시작(n=50): {}", evs[0].payload);
+        assert!(evs[199].payload.contains("\"n\":249}"), "마지막 원소=최신(n=249): {}", evs[199].payload);
     }
 
     #[test]

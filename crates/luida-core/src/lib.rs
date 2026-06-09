@@ -20,8 +20,8 @@ pub use repo::{
     RelationshipRepo,
 };
 pub use agents::{
-    default_agents_path, pid_alive, process_start_time, resolve, runner_alive, runtime_available,
-    AgentsConfig, CancelToken, ResolvedAgent,
+    default_agents_path, kill_process_group, pid_alive, process_start_time, resolve, runner_alive,
+    runtime_available, AgentsConfig, CancelToken, ResolvedAgent,
 };
 pub use handoff::{
     machine_id, resume_bundle, suspend_campaign, HandoffBundle,

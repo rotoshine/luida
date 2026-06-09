@@ -23,20 +23,30 @@ use luida_core::agents::{
 };
 
 /// child가 drop될 때 반드시 kill+reap (좀비 방지).
-struct ChildGuard(Option<Child>);
+/// `group_kill`=true 면 자식이 `process_group(0)` 으로 새 프로세스 그룹의 리더라,
+/// drop 시 그룹 전체에 SIGKILL 을 보내 자식이 띄운 손자(MCP·툴 서브프로세스)까지 정리한다(고아 방지).
+struct ChildGuard {
+    child: Option<Child>,
+    group_kill: bool,
+}
 
 impl ChildGuard {
-    fn new(c: Child) -> Self {
-        Self(Some(c))
+    fn new(c: Child, group_kill: bool) -> Self {
+        Self { child: Some(c), group_kill }
     }
     fn take(&mut self) -> Option<Child> {
-        self.0.take()
+        self.child.take()
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if let Some(mut c) = self.0.take() {
+        if let Some(mut c) = self.child.take() {
+            // group_kill 이면 그룹 전체(손자 포함)를 먼저 정리. kill_process_group 은 unix 에서
+            // 그룹+직접 kill, 비-unix 는 no-op 이므로 c.kill()로 직접 자식을 한 번 더 보강한다.
+            if self.group_kill {
+                luida_core::kill_process_group(c.id());
+            }
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -63,8 +73,19 @@ fn run_cli_streaming(
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
+    // cancel 토큰이 있으면(TUI 등 외부에서 명시적 종료를 통제) 자식을 새 프로세스 그룹의 리더로
+    // 만든다(process_group(0) → pgid == child pid). 취소 시 그룹 전체에 SIGKILL 을 보내 자식이
+    // 띄운 손자(MCP·툴 서브프로세스)까지 정리 → 고아 방지. cancel 이 없으면(CLI 일반 실행) 부모
+    // 그룹을 유지해 터미널 시그널(Ctrl-C) 전파 등 기존 동작을 보존한다.
+    let group_kill = cancel.is_some();
+    #[cfg(unix)]
+    if group_kill {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd.spawn().context("CLI 실행 실패 (설치/PATH 확인)")?;
-    // 취소 대상 PID 등록 (취소 시 SIGKILL). 등록 시점에 이미 취소됐다면 즉시 kill.
+    // 취소 대상 PID 등록 (취소 시 그룹 SIGKILL). 등록 시점에 이미 취소됐다면 즉시 kill.
     if let Some(c) = cancel {
         c.register_child(child.id());
     }
@@ -80,7 +101,7 @@ fn run_cli_streaming(
     });
 
     let stdout = child.stdout.take().context("stdout 파이프 없음")?;
-    let mut guard = ChildGuard::new(child);
+    let mut guard = ChildGuard::new(child, group_kill);
 
     let mut outcome = AgentOutcome::default();
     {
@@ -410,5 +431,70 @@ mod tests {
         assert!(outcome.cancelled, "취소로 중단됐어야");
         assert!(t0.elapsed() < Duration::from_secs(5), "취소 후 즉시 종료해야(30초 대기 아님)");
         assert!(!pid_alive(pid), "자식이 SIGKILL 로 종료·회수됐어야");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_kills_grandchild_via_process_group() {
+        // 자식(sh)이 손자(sleep 30)를 띄우고 손자 PID 를 임시파일에 기록한다.
+        // 취소 시 프로세스 그룹 전체 SIGKILL → 손자까지 죽어야 한다(고아 방지의 핵심 회귀).
+        use luida_core::pid_alive;
+        use std::time::{Duration, Instant};
+
+        let tmp = std::env::temp_dir().join(format!("luida-gc-test-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let token = CancelToken::new();
+        let t2 = token.clone();
+        let tmp2 = tmp.clone();
+        let handle = std::thread::spawn(move || {
+            let mut cmd = Command::new("sh");
+            // sleep 을 백그라운드(손자)로 띄우고 그 PID 를 파일에 남긴 뒤 wait 로 그룹을 유지.
+            cmd.arg("-c")
+                .arg(format!("sleep 30 & echo $! > '{}'; wait", tmp2.display()));
+            run_cli_streaming(cmd, None, Some(&t2), &mut |_| {})
+        });
+
+        // 자식 등록 + 손자 PID 기록 대기(최대 ~3초).
+        let mut child_pid = 0u32;
+        let mut gc_pid = 0u32;
+        for _ in 0..300 {
+            if child_pid == 0 {
+                child_pid = token.registered_pid();
+            }
+            if gc_pid == 0 {
+                if let Ok(s) = std::fs::read_to_string(&tmp) {
+                    if let Ok(p) = s.trim().parse::<u32>() {
+                        gc_pid = p;
+                    }
+                }
+            }
+            if child_pid != 0 && gc_pid != 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(child_pid != 0, "자식 PID 가 등록돼야");
+        assert!(gc_pid != 0, "손자 PID 가 기록돼야");
+        assert!(pid_alive(gc_pid), "취소 전 손자가 살아있어야");
+        // 자식이 새 프로세스 그룹 리더인지(pgid == pid) — 그룹 kill 이 손자에 닿는 전제.
+        let pgid = unsafe { libc::getpgid(child_pid as libc::pid_t) };
+        assert_eq!(pgid, child_pid as libc::pid_t, "자식이 새 프로세스 그룹 리더여야");
+
+        token.cancel();
+        let outcome = handle.join().unwrap().unwrap();
+        assert!(outcome.cancelled, "취소로 중단됐어야");
+
+        // 손자가 그룹 SIGKILL 로 종료·회수됐는지(최대 5초 대기).
+        let t0 = Instant::now();
+        let mut dead = false;
+        while t0.elapsed() < Duration::from_secs(5) {
+            if !pid_alive(gc_pid) {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_file(&tmp);
+        assert!(dead, "손자가 프로세스 그룹 kill 로 종료됐어야(고아 방지)");
     }
 }

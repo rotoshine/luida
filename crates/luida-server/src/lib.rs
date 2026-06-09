@@ -5,6 +5,7 @@
 //!
 //! rusqlite Connection은 !Sync라 Arc<Mutex<Connection>>로 공유.
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -31,6 +32,24 @@ use serde_json::{json, Value};
 pub struct AppState {
     conn: Arc<Mutex<Connection>>,
     db_path: PathBuf,
+    /// 현재 실행 중인 campaign id 집합 — 같은 원정의 중복 run 을 막는다(이중 디스패치/split-brain 방지).
+    running: Arc<Mutex<HashSet<i64>>>,
+}
+
+/// run_http 동시 실행 가드 — drop 시 running 집합에서 campaign id 를 제거한다.
+/// blocking 작업이 정상/에러/패닉 어느 경로로 끝나도 제거가 보장돼 점유가 새지 않는다.
+struct RunGuard {
+    running: Arc<Mutex<HashSet<i64>>>,
+    id: i64,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
 }
 
 /// Mutex poisoning을 복구해 잠금 (한 핸들러의 패닉이 서버 전체를 죽이지 않게). review C3.
@@ -146,8 +165,21 @@ async fn plan_http(State(state): State<AppState>, Json(req): Json<PlanReq>) -> i
 
 /// POST /api/campaigns/{id}/run — 원정 실행(의존성 순, 완료까지 블로킹).
 async fn run_http(State(state): State<AppState>, Path(id): Path<i64>) -> impl IntoResponse {
+    // 동시 실행 가드 — 같은 campaign 이 이미 실행 중이면 거부(이중 디스패치/split-brain 방지).
+    // insert 가 false 면 이미 점유 중. 원자적 체크-앤-셋이라 동시 요청 경합도 안전.
+    {
+        let mut running = state.running.lock().unwrap_or_else(|p| p.into_inner());
+        if !running.insert(id) {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({ "error": format!("campaign {id} 는 이미 실행 중이에요") })),
+            );
+        }
+    }
     let db = state.db_path.clone();
+    let guard = RunGuard { running: state.running.clone(), id };
     let r = tokio::task::spawn_blocking(move || -> Result<Value> {
+        let _guard = guard; // blocking 작업 종료(정상/에러/패닉) 시 running 에서 id 제거
         let (mut conn, cfg) = open_ready(&db)?;
         let report = run_campaign(&mut conn, &cfg, id, make_worktree().as_ref(), make_factory())?;
         Ok(json!({
@@ -236,6 +268,7 @@ pub async fn serve(port: u16, conn: Connection, db_path: PathBuf) -> Result<()> 
     let state = AppState {
         conn: Arc::new(Mutex::new(conn)),
         db_path,
+        running: Arc::new(Mutex::new(HashSet::new())),
     };
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
@@ -283,6 +316,7 @@ mod tests {
         AppState {
             conn: Arc::new(Mutex::new(conn)),
             db_path: std::path::PathBuf::from(":memory:"),
+            running: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -387,6 +421,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn run_rejects_concurrent_duplicate() {
+        // 이미 실행 중인 campaign 의 중복 run 요청은 409 CONFLICT 로 거부돼야(이중 디스패치 방지).
+        let state = seeded_state();
+        state
+            .running
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(1); // campaign 1 이 실행 중이라고 점유 표시
+        let app = build_router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/campaigns/1/run")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn run_guard_releases_id_on_drop() {
+        // RunGuard 가 drop 되면 running 점유가 해제돼 다음 run 이 가능해야(점유 누수 방지).
+        let running: Arc<Mutex<HashSet<i64>>> = Arc::new(Mutex::new(HashSet::new()));
+        running.lock().unwrap().insert(7);
+        {
+            let _g = RunGuard { running: running.clone(), id: 7 };
+            assert!(running.lock().unwrap().contains(&7));
+        }
+        assert!(!running.lock().unwrap().contains(&7), "drop 후 해제돼야");
     }
 
     #[test]

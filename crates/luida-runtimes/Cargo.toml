@@ -9,3 +9,6 @@ license.workspace = true
 luida-core = { path = "../luida-core" }
 anyhow.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
