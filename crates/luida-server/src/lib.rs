@@ -263,17 +263,29 @@ async fn stream(
     Sse::new(s).keep_alive(KeepAlive::default())
 }
 
-/// 서버 실행 (127.0.0.1:port). luida server start에서 호출.
-pub async fn serve(port: u16, conn: Connection, db_path: PathBuf) -> Result<()> {
+/// 서버 실행 (`host`:`port` 에 바인드). luida server start에서 호출.
+///
+/// `host` 가 루프백(127.0.0.1/localhost/::1)이 아니면 명령 API(/api/campaigns/plan·run 등)가
+/// 네트워크에 노출되므로 경고한다. 원격 서버 + Tailscale + 모바일 브라우저로 쓰려면
+/// `--host 0.0.0.0`(또는 tailscale IP)로 바인드하되 **Tailscale 등 신뢰 네트워크에서만** 쓸 것.
+pub async fn serve(host: &str, port: u16, conn: Connection, db_path: PathBuf) -> Result<()> {
     let state = AppState {
         conn: Arc::new(Mutex::new(conn)),
         db_path,
         running: Arc::new(Mutex::new(HashSet::new())),
     };
     let app = build_router(state);
-    let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("바인드 실패 {addr}: {e}"))?;
     eprintln!("🛰  luida-server listening on http://{addr}");
+    if !matches!(host, "127.0.0.1" | "localhost" | "::1") {
+        eprintln!(
+            "⚠️  비루프백 바인드({host}) — /api 명령(plan/run/resume 등)이 네트워크에 노출됩니다. \
+             Tailscale 등 신뢰 네트워크에서만 사용하세요."
+        );
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

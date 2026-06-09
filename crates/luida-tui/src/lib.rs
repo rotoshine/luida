@@ -782,12 +782,13 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
                         return Ok(true);
                     }
                 }
-                KeyCode::Tab => {
+                // Tab / → : 정방향 탭 전환. 십자키(←→)만으로도 탭 이동 가능 → 모바일 SSH 친화.
+                KeyCode::Tab | KeyCode::Right => {
                     app.detail = None;
                     app.switch_tab();
                 }
-                // Shift+Tab: 역방향 탭 전환 (docs 명시).
-                KeyCode::BackTab => {
+                // Shift+Tab / ← : 역방향 탭 전환.
+                KeyCode::BackTab | KeyCode::Left => {
                     app.detail = None;
                     app.switch_tab_prev();
                 }
@@ -1141,7 +1142,7 @@ fn draw(f: &mut Frame, app: &mut App) {
                 if s.starts_with('⚠') { RED } else { GREEN },
             ),
             None => (
-                " Tab 탭 · j/k 이동 · Enter/d 상세 · x 실행 · p 계획 · a 등록 · c 보고 · n 판단대기 · ? 도움말 · q 종료 "
+                " ←→ 탭 · ↑↓ 이동 · Enter 상세 · x 실행 · p 계획 · a 등록 · c 보고 · n 판단대기 · ? 도움말 · q 종료 "
                     .to_string(),
                 DIM,
             ),
@@ -1179,8 +1180,8 @@ fn draw(f: &mut Frame, app: &mut App) {
         let lines = [
             "  키 도움말",
             "",
-            "  Tab / Shift+Tab  탭 전환 (모험지 / 원정 / 모험)",
-            "  j / k            위 / 아래 이동",
+            "  Tab/Shift+Tab·←/→  탭 전환 (모험지 / 원정 / 모험)",
+            "  j / k · ↑ / ↓      위 / 아래 이동 (십자키만으로 메뉴 이동 가능)",
             "  Enter / d        선택 항목 상세(타임라인) 토글",
             "  PgUp/PgDn        상세 스크롤 (Home 맨위 · End 꼬리추적 복귀)",
             "  x                원정 실행 (원정 탭)",
@@ -1810,6 +1811,26 @@ mod tests {
         assert_eq!(app.tab, Tab::Quests);
         handle_key(&mut app, ev(KeyCode::BackTab)).unwrap();
         assert_eq!(app.tab, Tab::Campaigns);
+    }
+
+    #[test]
+    fn arrow_left_right_switch_tabs() {
+        // 십자키만으로 탭 이동 (모바일 SSH 친화): → 정방향, ← 역방향.
+        let conn = seeded();
+        let mut app = test_app(&conn);
+        assert_eq!(app.tab, Tab::Projects);
+        handle_key(&mut app, ev(KeyCode::Right)).unwrap();
+        assert_eq!(app.tab, Tab::Campaigns);
+        handle_key(&mut app, ev(KeyCode::Right)).unwrap();
+        assert_eq!(app.tab, Tab::Quests);
+        handle_key(&mut app, ev(KeyCode::Left)).unwrap();
+        assert_eq!(app.tab, Tab::Campaigns);
+        // 상세가 열려있어도 ←/→ 는 닫고 전환 (Tab 과 동일 동작).
+        handle_key(&mut app, ev(KeyCode::Enter)).unwrap(); // Campaigns 상세 열기
+        assert!(app.detail.is_some());
+        handle_key(&mut app, ev(KeyCode::Right)).unwrap();
+        assert!(app.detail.is_none());
+        assert_eq!(app.tab, Tab::Quests);
     }
 
     #[test]

@@ -162,8 +162,8 @@ luida ui
 
 | 키 | 동작 |
 |---|---|
-| `Tab` / `Shift+Tab` | 탭 전환(정/역방향) |
-| `j`/`k`·↑/↓ | 항목 이동 |
+| `Tab`/`Shift+Tab` · `→`/`←` | 탭 전환(정/역방향) — 십자키만으로도 이동(모바일 SSH) |
+| `j`/`k` · `↑`/`↓` | 항목 이동 |
 | `Enter`/`d` | 선택 항목 상세(타임라인+메타데이터) 토글 |
 | `PgUp`/`PgDn`·`Home`·`End` | 상세 스크롤 / 맨 위(Home) / 꼬리추적(tail) 복귀(End) |
 | `x` | 선택 원정 실행 |
@@ -184,12 +184,22 @@ luida ui
 
 ### 4.2 Web / GUI 브리지 (HTTP·SSE)
 ```bash
-luida server start --port 4321
+luida server start --port 4321            # 기본 127.0.0.1 (로컬 전용)
 curl -s http://127.0.0.1:4321/api/health
 curl -s http://127.0.0.1:4321/api/snapshot | head -c 200
 ```
-- `GET /api/snapshot` 초기 상태, `GET /api/stream` SSE 라이브 갱신, `POST /api/projects` 모험지 명령 (ADR-0002).
-- 프론트엔드(Vite/React)와 Tauri 래퍼는 [`packages/web`](../packages/web/README.md).
+- 내장 웹 대시보드: `GET /`(반응형 HTML — 모바일 세로 1열). `GET /api/snapshot` 초기 상태, `GET /api/stream` **SSE 라이브 갱신**, 명령 API: `POST /api/projects`, `/api/campaigns/plan`, `/api/campaigns/{id}/run`, `/api/quests/{id}/resume|triage` (ADR-0002).
+- (참고) 별도 프론트엔드(Vite/React)·Tauri 래퍼 초안은 레거시 [`packages/web`](../packages/web/README.md).
+
+#### 원격 서버 + Tailscale + 모바일 브라우저
+모바일에서 TUI 대신 브라우저로 보고 싶을 때. 서버를 Tailscale 인터페이스에 노출한다.
+```bash
+# 원격 서버에서: 모든 인터페이스 바인드 (Tailscale IP 로도 접속 가능)
+luida server start --host 0.0.0.0 --port 4321
+# 모바일(같은 tailnet): 브라우저로 http://<원격-tailscale-IP>:4321
+```
+- ⚠️ `--host` 가 루프백이 아니면 **명령 API(plan/run 등)가 네트워크에 노출**된다(인증 없음). 반드시 **Tailscale 같은 신뢰 네트워크에서만** 쓸 것 — 공인망/사무실 LAN 바인드 금지. 서버가 비루프백 바인드 시 경고를 출력한다.
+- 더 좁히려면 `--host <tailscale-IP>`(예 `100.x.y.z`)로 그 인터페이스에만 바인드. 백그라운드 상주는 `nohup`/`systemd --user`/`tmux` 등으로.
 
 ---
 

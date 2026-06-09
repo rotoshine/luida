@@ -78,10 +78,13 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum ServerAction {
-    /// 로컬 HTTP/SSE 서버 시작
+    /// HTTP/SSE 서버 시작. 원격+Tailscale+모바일 브라우저로 쓰려면 `--host 0.0.0.0`.
     Start {
         #[arg(long, default_value_t = 4321)]
         port: u16,
+        /// 바인드 호스트. 기본 127.0.0.1(로컬 전용). Tailscale 노출은 `0.0.0.0` 또는 tailscale IP.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
     },
 }
 
@@ -423,14 +426,14 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Server { action } => match action {
-            ServerAction::Start { port } => {
+            ServerAction::Start { port, host } => {
                 let mut conn = open_db(&db_path)?;
                 migrate(&mut conn)?;
                 // 서버는 open_ready 를 거치지 않으므로 여기서 재시작 재조정 (이전 서버 실행이 강제
                 // 종료돼 'running'으로 남은 이 머신의 모험을 중단=이어받기 가능 으로 되돌림).
                 let _ = reconcile_interrupted_quests(&conn);
                 let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(async move { luida_server::serve(port, conn, db_path).await })?;
+                rt.block_on(async move { luida_server::serve(&host, port, conn, db_path).await })?;
             }
         },
         Cmd::Ui => {

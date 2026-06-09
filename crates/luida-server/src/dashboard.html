@@ -48,6 +48,14 @@
   .toast { background: var(--panel); border: 1px solid var(--green); color: var(--text);
     padding: 8px 12px; border-radius: 8px; max-width: 360px; box-shadow: 0 4px 16px #0008; }
   .toast.err { border-color: var(--red); }
+  /* 모바일 세로: 4열 그리드를 1열로 쌓아 좁은 화면에서도 읽기 좋게 (Tailscale+모바일 브라우저). */
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; }
+    header { flex-wrap: wrap; }
+    .new { flex-wrap: wrap; }
+    #toast { left: 16px; right: 16px; }
+    .toast { max-width: none; }
+  }
 </style>
 </head>
 <body>
