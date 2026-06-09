@@ -99,8 +99,12 @@ pub fn pid_alive(pid: u32) -> bool {
     }
 }
 
-/// PID 프로세스의 시작 시각(epoch ms). PID 재사용 구분용 — 같은 PID 라도 시작시각이 다르면
+/// PID 프로세스의 시작 시각. PID 재사용 구분용 — 같은 PID 라도 시작시각이 다르면
 /// 재사용된 다른 프로세스다. 조회 불가/미지원 플랫폼은 None.
+///
+/// 단위는 플랫폼별로 다르다: macOS=epoch ms(pbi_start_tvsec/tvusec 환산),
+/// Linux=boot 이후 clock ticks(/proc/<pid>/stat 22번 필드). 절대 단위를 비교에 쓰지 않고
+/// 같은 머신에서 저장값(runner_started_at)과 현재값의 '동일성'만 보므로 단위 혼재는 무해하다.
 pub fn process_start_time(pid: u32) -> Option<i64> {
     #[cfg(target_os = "macos")]
     {

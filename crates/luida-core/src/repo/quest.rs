@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -151,11 +153,15 @@ impl<'a> QuestRepo<'a> {
         Ok(())
     }
 
-    /// running/reviewing 상태 quest 의 (id, pid, machine, started_at) 목록. 재조정 입력.
+    /// running 상태 quest 의 (id, pid, machine, started_at) 목록. 재시작 재조정 입력.
+    ///
+    /// 재조정 대상은 set_runner 로 runner 리스(pid·시작시각)를 확실히 찍는 'running' 으로 한정한다.
+    /// 다른 상태(예: 'reviewing')를 추가하려면 그 상태 진입 시에도 set_runner 갱신을 보장해야,
+    /// stale runner_pid 로 멀쩡한 작업을 pending 으로 되돌리는 오복구를 막을 수 있다.
     pub fn list_running_runners(&self) -> Result<Vec<QuestRunner>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, runner_pid, runner_machine, runner_started_at FROM quests
-             WHERE status IN ('running', 'reviewing')",
+             WHERE status = 'running'",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -219,6 +225,25 @@ impl<'a> QuestRepo<'a> {
         Ok(out)
     }
 
+    /// campaign 내 모든 quest 의 의존성(quest_id → depends_on_quest_id 목록)을 한 번의 쿼리로.
+    /// ready_in_campaign 의 quest 별 `dependencies()` 개별 호출(N+1)을 제거하기 위한 일괄 로드.
+    fn dependencies_for_campaign(&self, campaign_id: i64) -> Result<HashMap<i64, Vec<i64>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.quest_id, d.depends_on_quest_id
+             FROM quest_deps d JOIN quests q ON q.id = d.quest_id
+             WHERE q.campaign_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![campaign_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut map: HashMap<i64, Vec<i64>> = HashMap::new();
+        for r in rows {
+            let (qid, dep) = r?;
+            map.entry(qid).or_default().push(dep);
+        }
+        Ok(map)
+    }
+
     /// 의존 quest가 모두 완료되어 실행 가능한 quest (pending + 모든 의존 완료).
     ///
     /// 의존성은 두 곳을 모두 본다: 레거시 단일 `depends_on_quest_id`(back-compat) +
@@ -231,6 +256,9 @@ impl<'a> QuestRepo<'a> {
             .filter(|q| q.status == "completed")
             .map(|q| q.id)
             .collect();
+        // campaign 의 모든 quest_deps 를 한 번에 로드 → pending quest 별 개별 쿼리(N+1) 제거.
+        // run_campaign 루프가 매 반복마다 ready_in_campaign 을 부르므로 호출 빈도가 높다.
+        let deps_by_quest = self.dependencies_for_campaign(campaign_id)?;
 
         let mut ready = Vec::new();
         for q in all.into_iter().filter(|q| q.status == "pending") {
@@ -240,10 +268,10 @@ impl<'a> QuestRepo<'a> {
             if !legacy_ok {
                 continue;
             }
-            let multi_ok = self
-                .dependencies(q.id)?
-                .iter()
-                .all(|dep| completed.contains(dep));
+            // 의존 기록이 없으면(None) 의존 없음 = ready. 있으면 전부 완료여야 ready.
+            let multi_ok = deps_by_quest
+                .get(&q.id)
+                .is_none_or(|deps| deps.iter().all(|dep| completed.contains(dep)));
             if multi_ok {
                 ready.push(q);
             }

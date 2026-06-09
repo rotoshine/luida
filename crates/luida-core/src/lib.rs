@@ -43,7 +43,11 @@ pub fn is_fake() -> bool {
 pub fn open_ready(db_path: &std::path::Path) -> anyhow::Result<(Connection, AgentsConfig)> {
     let mut conn = open_db(db_path)?;
     migrate(&mut conn)?;
-    let _ = reconcile_interrupted_quests(&conn);
+    // reconcile 실패(일시적 DB 락/IO 등)로 부팅을 막지는 않되, 조용히 삼키지 않고 알린다.
+    // reconcile 은 멱등이라 다음 부팅에서 다시 시도된다.
+    if let Err(e) = reconcile_interrupted_quests(&conn) {
+        eprintln!("⚠️  부팅 재조정(reconcile) 실패 — 무시하고 계속: {e}");
+    }
     let cfg = AgentsConfig::load_or_default(&default_agents_path())?;
     Ok((conn, cfg))
 }
